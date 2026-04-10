@@ -27,6 +27,7 @@ import {
   readHomepageSnapshotJson,
   readStatusSnapshot,
   readStaleHomepageSnapshot,
+  readStaleHomepageSnapshotArtifact,
   readStaleHomepageSnapshotArtifactJson,
   toSnapshotPayload,
   writeStatusSnapshot,
@@ -39,6 +40,8 @@ type PublicStatusSnapshotRow = {
   generated_at: number;
   body_json: string;
 };
+
+const HOMEPAGE_UNKNOWN_DOWNGRADE_GUARD_SECONDS = 2 * 60;
 
 function safeJsonParse(text: string): unknown | null {
   const trimmed = text.trim();
@@ -71,6 +74,52 @@ function applyPrivateNoStore(res: Response): Response {
 
 function withVisibilityAwareCaching(res: Response, includeHiddenMonitors: boolean): Response {
   return includeHiddenMonitors ? applyPrivateNoStore(res) : res;
+}
+
+function shouldPreferRecentHomepageArtifact(opts: {
+  artifact:
+    | {
+        age: number;
+        data: {
+          snapshot: {
+            overall_status: string;
+            banner: { status: string };
+            summary: { unknown: number };
+          };
+        };
+      }
+    | null;
+  computed: {
+    overall_status: string;
+    banner: { status: string };
+    summary: { unknown: number };
+  };
+}): boolean {
+  const { artifact, computed } = opts;
+  if (!artifact) return false;
+
+  const snapshot = artifact.data.snapshot;
+  if (artifact.age > HOMEPAGE_UNKNOWN_DOWNGRADE_GUARD_SECONDS) {
+    return false;
+  }
+
+  const computedShowsUnknownLead =
+    computed.overall_status === 'unknown' || computed.banner.status === 'unknown';
+  if (!computedShowsUnknownLead) {
+    return false;
+  }
+
+  const artifactShowsKnownLead =
+    snapshot.overall_status !== 'unknown' || snapshot.banner.status !== 'unknown';
+  if (!artifactShowsKnownLead) {
+    return false;
+  }
+
+  return (
+    computed.summary.unknown > snapshot.summary.unknown ||
+    computed.overall_status !== snapshot.overall_status ||
+    computed.banner.status !== snapshot.banner.status
+  );
 }
 
 async function readStaleStatusSnapshot(
@@ -567,8 +616,20 @@ publicRoutes.get('/homepage', async (c) => {
     return res;
   }
 
+  const artifactSnapshotPromise = readStaleHomepageSnapshotArtifact(c.env.DB, now);
+
   try {
     const statusPayload = await computePublicStatusPayload(c.env.DB, now);
+    const artifactSnapshot = await artifactSnapshotPromise;
+    if (
+      artifactSnapshot &&
+      shouldPreferRecentHomepageArtifact({ artifact: artifactSnapshot, computed: statusPayload })
+    ) {
+      const res = c.json(artifactSnapshot.data.snapshot);
+      applyHomepageCacheHeaders(res, Math.min(60, artifactSnapshot.age));
+      return res;
+    }
+
     const payload = homepageFromStatusPayload(statusPayload, await historyPreviewsPromise);
     const res = c.json(payload);
     applyHomepageCacheHeaders(res, 0);
@@ -601,6 +662,13 @@ publicRoutes.get('/homepage', async (c) => {
       );
       const res = c.json(payload);
       applyHomepageCacheHeaders(res, Math.min(60, staleStatus.age));
+      return res;
+    }
+
+    const staleArtifact = await artifactSnapshotPromise;
+    if (staleArtifact) {
+      const res = c.json(staleArtifact.data.snapshot);
+      applyHomepageCacheHeaders(res, Math.min(60, staleArtifact.age));
       return res;
     }
 
