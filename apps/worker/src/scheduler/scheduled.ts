@@ -6,9 +6,8 @@ import {
   parseDbJson,
   parseDbJsonNullable,
   webhookChannelConfigSchema,
-  type HttpResponseMatchMode,
-  type MonitorStatus,
-} from '@uptimer/db';
+} from '@uptimer/db/json';
+import type { HttpResponseMatchMode, MonitorStatus } from '@uptimer/db/schema';
 
 import type { Env } from '../env';
 import { runHttpCheck } from '../monitor/http';
@@ -20,7 +19,7 @@ import {
 } from '../monitor/state-machine';
 import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
-import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
+import type { WebhookChannel } from '../notify/webhook';
 import {
   TRACE_HEADER,
   TRACE_ID_HEADER,
@@ -131,6 +130,7 @@ type CachedMonitorHttpJson = {
 };
 
 const cachedMonitorHttpJsonById = new Map<number, CachedMonitorHttpJson>();
+let webhookModulePromise: Promise<typeof import('../notify/webhook')> | null = null;
 
 type DueMonitorRow = {
   id: number;
@@ -168,6 +168,11 @@ type NotifyContext = {
   envRecord: Record<string, unknown>;
   channels: WebhookChannelWithMeta[];
 };
+
+async function getWebhookDispatchModule() {
+  webhookModulePromise ??= import('../notify/webhook');
+  return await webhookModulePromise;
+}
 
 const listActiveWebhookChannelsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const listDueMonitorsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
@@ -741,16 +746,20 @@ function queueMonitorNotification(
   };
 
   notify.ctx.waitUntil(
-    dispatchWebhookToChannels({
-      db: env.DB,
-      env: notify.envRecord,
-      channels: notify.channels,
-      eventType,
-      eventKey,
-      payload,
-    }).catch((err) => {
-      console.error('notify: failed to dispatch webhooks', err);
-    }),
+    getWebhookDispatchModule()
+      .then(({ dispatchWebhookToChannels }) =>
+        dispatchWebhookToChannels({
+          db: env.DB,
+          env: notify.envRecord,
+          channels: notify.channels,
+          eventType,
+          eventKey,
+          payload,
+        }),
+      )
+      .catch((err) => {
+        console.error('notify: failed to dispatch webhooks', err);
+      }),
   );
 }
 
@@ -846,16 +855,20 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
         };
 
         notify.ctx.waitUntil(
-          dispatchWebhookToChannels({
-            db: env.DB,
-            env: notify.envRecord,
-            channels: channelsForEvent,
-            eventType,
-            eventKey,
-            payload,
-          }).catch((err) => {
-            console.error('notify: failed to dispatch maintenance.started', err);
-          }),
+          getWebhookDispatchModule()
+            .then(({ dispatchWebhookToChannels }) =>
+              dispatchWebhookToChannels({
+                db: env.DB,
+                env: notify.envRecord,
+                channels: channelsForEvent,
+                eventType,
+                eventKey,
+                payload,
+              }),
+            )
+            .catch((err) => {
+              console.error('notify: failed to dispatch maintenance.started', err);
+            }),
         );
       }
 
@@ -873,16 +886,20 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
         };
 
         notify.ctx.waitUntil(
-          dispatchWebhookToChannels({
-            db: env.DB,
-            env: notify.envRecord,
-            channels: channelsForEvent,
-            eventType,
-            eventKey,
-            payload,
-          }).catch((err) => {
-            console.error('notify: failed to dispatch maintenance.ended', err);
-          }),
+          getWebhookDispatchModule()
+            .then(({ dispatchWebhookToChannels }) =>
+              dispatchWebhookToChannels({
+                db: env.DB,
+                env: notify.envRecord,
+                channels: channelsForEvent,
+                eventType,
+                eventKey,
+                payload,
+              }),
+            )
+            .catch((err) => {
+              console.error('notify: failed to dispatch maintenance.ended', err);
+            }),
         );
       }
     });
