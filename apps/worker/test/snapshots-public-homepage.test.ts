@@ -250,7 +250,6 @@ describe('snapshots/public-homepage', () => {
     const storedRender = buildHomepageRenderArtifact(payload);
 
     expect(boundArgs).toEqual([
-      ['homepage', 280, JSON.stringify(payload), 300],
       ['homepage:artifact', 280, JSON.stringify(storedRender), 300],
     ]);
   });
@@ -421,7 +420,6 @@ describe('snapshots/public-homepage', () => {
     expect(acquireLease).toHaveBeenCalledWith(db, 'snapshot:homepage:refresh', now, 55);
     expect(compute).toHaveBeenCalledTimes(1);
     expect(writtenArgs).toEqual([
-      ['homepage', now, JSON.stringify(samplePayload(now)), now],
       ['homepage:artifact', now, JSON.stringify(storedRender), now],
     ]);
   });

@@ -344,17 +344,12 @@ function renderPreload(
 
 export function buildHomepageRenderArtifact(
   snapshot: PublicHomepageResponse,
-  snapshotBodyJson?: string,
 ): StoredPublicHomepageRenderArtifact {
   const fullSnapshot: PublicHomepageResponse = {
     ...snapshot,
     bootstrap_mode: 'full',
     monitor_count_total: snapshot.monitors.length,
   };
-  const canReuseSnapshotBodyJson =
-    snapshotBodyJson !== undefined &&
-    snapshot.bootstrap_mode === 'full' &&
-    snapshot.monitor_count_total === snapshot.monitors.length;
   const needsMonitorNames =
     fullSnapshot.maintenance_windows.active.length > 0 ||
     fullSnapshot.maintenance_windows.upcoming.length > 0 ||
@@ -374,7 +369,7 @@ export function buildHomepageRenderArtifact(
   return {
     generated_at: fullSnapshot.generated_at,
     preload_html: `<div id="uptimer-preload">${renderPreload(fullSnapshot, allMonitorNames)}</div>`,
-    snapshot_json: canReuseSnapshotBodyJson ? snapshotBodyJson : JSON.stringify(fullSnapshot),
+    snapshot: fullSnapshot,
     meta_title: metaTitle,
     meta_description: metaDescription,
   };
@@ -783,13 +778,13 @@ export async function writeHomepageSnapshot(
   now: number,
   payload: PublicHomepageResponse,
   trace?: Trace,
-  _seedDataSnapshot = false,
+  seedDataSnapshot = false,
 ): Promise<void> {
-  const payloadBodyJson = withTraceSync(trace, 'homepage_write_stringify_payload', () =>
-    JSON.stringify(payload),
-  );
+  const payloadBodyJson = seedDataSnapshot
+    ? withTraceSync(trace, 'homepage_write_stringify_payload', () => JSON.stringify(payload))
+    : null;
   const render = withTraceSync(trace, 'homepage_write_render', () =>
-    buildHomepageRenderArtifact(payload, payloadBodyJson),
+    buildHomepageRenderArtifact(payload),
   );
   const renderBodyJson = withTraceSync(trace, 'homepage_write_stringify_artifact', () =>
     JSON.stringify(render),
@@ -799,19 +794,23 @@ export async function writeHomepageSnapshot(
     const statements = [
       homepageSnapshotUpsertStatement(
         db,
-        SNAPSHOT_KEY,
-        render.generated_at,
-        payloadBodyJson,
-        now,
-      ),
-      homepageSnapshotUpsertStatement(
-        db,
         SNAPSHOT_ARTIFACT_KEY,
         render.generated_at,
         renderBodyJson,
         now,
       ),
     ];
+    if (payloadBodyJson !== null) {
+      statements.unshift(
+        homepageSnapshotUpsertStatement(
+          db,
+          SNAPSHOT_KEY,
+          render.generated_at,
+          payloadBodyJson,
+          now,
+        ),
+      );
+    }
 
     await db.batch(statements);
   });
