@@ -14,6 +14,11 @@ const SPLIT_SNAPSHOT_VERSION = 3;
 const LEGACY_COMBINED_SNAPSHOT_VERSION = 2;
 type SnapshotKey = typeof SNAPSHOT_KEY | typeof SNAPSHOT_ARTIFACT_KEY;
 
+const READ_REFRESH_SNAPSHOT_METADATA_SQL = `
+  SELECT key, generated_at, updated_at
+  FROM public_snapshots
+  WHERE key = ?1 OR key = ?2
+`;
 const READ_REFRESH_SNAPSHOT_ROWS_SQL = `
   SELECT key, generated_at, updated_at, body_json
   FROM public_snapshots
@@ -24,6 +29,7 @@ const READ_REFRESH_SNAPSHOT_ROW_BY_KEY_SQL = `
   FROM public_snapshots
   WHERE key = ?1
 `;
+const readRefreshSnapshotMetadataStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowByKeyStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const normalizedHomepagePayloadCacheByDb = new WeakMap<
@@ -48,6 +54,8 @@ type SnapshotRefreshRow = {
   body_json: string;
   updated_at?: number | null;
 };
+
+type SnapshotRefreshMetadataRow = Pick<SnapshotRefreshRow, 'key' | 'generated_at' | 'updated_at'>;
 
 type SnapshotCandidate = {
   key: SnapshotKey;
@@ -417,6 +425,26 @@ async function readRefreshSnapshotRows(
   }
 }
 
+async function readRefreshSnapshotMetadataRows(
+  db: D1Database,
+): Promise<SnapshotRefreshMetadataRow[]> {
+  try {
+    const cached = readRefreshSnapshotMetadataStatementByDb.get(db);
+    const statement = cached ?? db.prepare(READ_REFRESH_SNAPSHOT_METADATA_SQL);
+    if (!cached) {
+      readRefreshSnapshotMetadataStatementByDb.set(db, statement);
+    }
+
+    const { results } = await statement
+      .bind(SNAPSHOT_KEY, SNAPSHOT_ARTIFACT_KEY)
+      .all<SnapshotRefreshMetadataRow>();
+    return results ?? [];
+  } catch (err) {
+    console.warn('homepage snapshot: refresh metadata read failed', err);
+    return [];
+  }
+}
+
 async function readRefreshSnapshotRowByKey(
   db: D1Database,
   key: SnapshotKey,
@@ -437,7 +465,7 @@ async function readRefreshSnapshotRowByKey(
 }
 
 function listSnapshotCandidatesFromRefreshRows(
-  rows: readonly Pick<SnapshotRefreshRow, 'key' | 'generated_at' | 'updated_at'>[],
+  rows: readonly SnapshotRefreshMetadataRow[],
 ): SnapshotCandidate[] {
   return rows.map((row) => ({
     key: row.key,
@@ -530,197 +558,77 @@ function readValidatedSnapshotCandidateFromRefreshRows(opts: {
   };
 }
 
-function toSnapshotCandidateFromRow(row: SnapshotRefreshRow): SnapshotCandidate {
-  return {
-    key: row.key,
-    generatedAt: row.generated_at,
-    updatedAt: toSnapshotUpdatedAt(row),
-  };
-}
-
-function readNormalizedPayloadCandidateFromRow(opts: {
-  db: D1Database;
-  now: number;
-  row: SnapshotRefreshRow | null;
-}): { row: NormalizedSnapshotRow | null; invalid: boolean } {
-  const { db, now, row } = opts;
-  if (!row) {
-    return { row: null, invalid: false };
-  }
-
-  const candidate = toSnapshotCandidateFromRow(row);
-  if (isFutureSnapshotCandidate(candidate, now)) {
-    return { row: null, invalid: true };
-  }
-
-  const dbCached = readCachedNormalizedSnapshotRow(
-    normalizedHomepagePayloadCacheByDb,
-    db,
-    candidate,
-    row.body_json,
-  );
-  if (dbCached) {
-    return { row: dbCached, invalid: false };
-  }
-
-  const globalCached = readCachedNormalizedSnapshotRowGlobal(
-    normalizedHomepagePayloadCacheGlobal,
-    candidate,
-    row.body_json,
-  );
-  if (globalCached) {
-    return {
-      row: writeCachedNormalizedSnapshotRow(
-        normalizedHomepagePayloadCacheByDb,
-        db,
-        candidate,
-        row.body_json,
-        globalCached.bodyJson,
-      ),
-      invalid: false,
-    };
-  }
-
-  const bodyJson = normalizeHomepagePayloadBodyJsonForKey(candidate.key, row.body_json);
-  if (!bodyJson) {
-    return { row: null, invalid: true };
-  }
-
-  return {
-    row: writeCachedNormalizedSnapshotRow(
-      normalizedHomepagePayloadCacheByDb,
-      db,
-      candidate,
-      row.body_json,
-      writeCachedNormalizedSnapshotRowGlobal(
-        normalizedHomepagePayloadCacheGlobal,
-        candidate,
-        row.body_json,
-        bodyJson,
-      ).bodyJson,
-    ),
-    invalid: false,
-  };
-}
-
-function readParsedPayloadCandidateFromRow(opts: {
-  db: D1Database;
-  now: number;
-  row: SnapshotRefreshRow | null;
-}): { row: ParsedSnapshotRow | null; invalid: boolean } {
-  const { db, now, row } = opts;
-  if (!row) {
-    return { row: null, invalid: false };
-  }
-
-  const candidate = toSnapshotCandidateFromRow(row);
-  if (isFutureSnapshotCandidate(candidate, now)) {
-    return { row: null, invalid: true };
-  }
-
-  const dbCached = readCachedParsedSnapshotRow(
-    parsedHomepagePayloadCacheByDb,
-    db,
-    candidate,
-    row.body_json,
-  );
-  if (dbCached) {
-    return { row: dbCached, invalid: false };
-  }
-
-  const globalCached = readCachedParsedSnapshotRowGlobal(
-    parsedHomepagePayloadCacheGlobal,
-    candidate,
-    row.body_json,
-  );
-  if (globalCached) {
-    return {
-      row: writeCachedParsedSnapshotRow(
-        parsedHomepagePayloadCacheByDb,
-        db,
-        candidate,
-        row.body_json,
-        globalCached.snapshot,
-      ),
-      invalid: false,
-    };
-  }
-
-  const snapshot = parseHomepagePayloadSnapshotForKey(candidate.key, row.body_json);
-  if (!snapshot) {
-    return { row: null, invalid: true };
-  }
-
-  return {
-    row: writeCachedParsedSnapshotRow(
-      parsedHomepagePayloadCacheByDb,
-      db,
-      candidate,
-      row.body_json,
-      writeCachedParsedSnapshotRowGlobal(
-        parsedHomepagePayloadCacheGlobal,
-        candidate,
-        row.body_json,
-        snapshot,
-      ).snapshot,
-    ),
-    invalid: false,
-  };
-}
-
-function pickPreferredSnapshotRow<Row extends { generatedAt: number; updatedAt: number }>(
-  payloadRow: Row | null,
-  artifactRow: Row | null,
-  predicate?: (row: Row) => boolean,
-): { key: SnapshotKey; row: Row } | null {
-  const preferredPayload =
-    payloadRow && (!predicate || predicate(payloadRow)) ? payloadRow : null;
-  const preferredArtifact =
-    artifactRow && (!predicate || predicate(artifactRow)) ? artifactRow : null;
-
-  if (preferredPayload && preferredArtifact) {
-    return comparePayloadCandidates(
-      {
-        key: SNAPSHOT_KEY,
-        generatedAt: preferredPayload.generatedAt,
-        updatedAt: preferredPayload.updatedAt,
-      },
-      {
-        key: SNAPSHOT_ARTIFACT_KEY,
-        generatedAt: preferredArtifact.generatedAt,
-        updatedAt: preferredArtifact.updatedAt,
-      },
-    ) <= 0
-      ? { key: SNAPSHOT_KEY, row: preferredPayload }
-      : { key: SNAPSHOT_ARTIFACT_KEY, row: preferredArtifact };
-  }
-
-  if (preferredPayload) {
-    return { key: SNAPSHOT_KEY, row: preferredPayload };
-  }
-  if (preferredArtifact) {
-    return { key: SNAPSHOT_ARTIFACT_KEY, row: preferredArtifact };
-  }
-  return null;
-}
-
 export async function readHomepageSnapshotGeneratedAt(
   db: D1Database,
   now = Math.floor(Date.now() / 1000),
 ): Promise<number | null> {
-  const payloadResult = readNormalizedPayloadCandidateFromRow({
-    db,
-    now,
-    row: await readRefreshSnapshotRowByKey(db, SNAPSHOT_KEY),
-  });
+  const candidates = listSnapshotCandidatesFromRefreshRows(await readRefreshSnapshotMetadataRows(db))
+    .filter((candidate) => !isFutureSnapshotCandidate(candidate, now))
+    .sort(comparePayloadCandidates);
 
-  const artifactResult = readNormalizedPayloadCandidateFromRow({
-    db,
-    now,
-    row: await readRefreshSnapshotRowByKey(db, SNAPSHOT_ARTIFACT_KEY),
-  });
+  for (const candidate of candidates) {
+    const row = await readRefreshSnapshotRowByKey(db, candidate.key);
+    if (!row) {
+      continue;
+    }
 
-  return pickPreferredSnapshotRow(payloadResult.row, artifactResult.row)?.row.generatedAt ?? null;
+    const liveCandidate: SnapshotCandidate = {
+      key: candidate.key,
+      generatedAt: row.generated_at,
+      updatedAt: toSnapshotUpdatedAt(row),
+    };
+    if (isFutureSnapshotCandidate(liveCandidate, now)) {
+      continue;
+    }
+
+    const dbCached = readCachedNormalizedSnapshotRow(
+      normalizedHomepagePayloadCacheByDb,
+      db,
+      liveCandidate,
+      row.body_json,
+    );
+    if (dbCached) {
+      return dbCached.generatedAt;
+    }
+
+    const globalCached = readCachedNormalizedSnapshotRowGlobal(
+      normalizedHomepagePayloadCacheGlobal,
+      liveCandidate,
+      row.body_json,
+    );
+    if (globalCached) {
+      writeCachedNormalizedSnapshotRow(
+        normalizedHomepagePayloadCacheByDb,
+        db,
+        liveCandidate,
+        row.body_json,
+        globalCached.bodyJson,
+      );
+      return liveCandidate.generatedAt;
+    }
+
+    const bodyJson = normalizeHomepagePayloadBodyJsonForKey(liveCandidate.key, row.body_json);
+    if (!bodyJson) {
+      continue;
+    }
+
+    writeCachedNormalizedSnapshotRowGlobal(
+      normalizedHomepagePayloadCacheGlobal,
+      liveCandidate,
+      row.body_json,
+      bodyJson,
+    );
+    writeCachedNormalizedSnapshotRow(
+      normalizedHomepagePayloadCacheByDb,
+      db,
+      liveCandidate,
+      row.body_json,
+      bodyJson,
+    );
+    return liveCandidate.generatedAt;
+  }
+
+  return null;
 }
 
 export async function readHomepageArtifactSnapshotGeneratedAt(
@@ -757,41 +665,107 @@ export async function readHomepageRefreshBaseSnapshot(
   snapshot: PublicHomepageResponse | null;
   seedDataSnapshot: boolean;
 }> {
-  const payloadResult = readParsedPayloadCandidateFromRow({
-    db,
-    now,
-    row: await readRefreshSnapshotRowByKey(db, SNAPSHOT_KEY),
-  });
+  const candidates = listSnapshotCandidatesFromRefreshRows(await readRefreshSnapshotMetadataRows(db))
+    .filter((candidate) => !isFutureSnapshotCandidate(candidate, now))
+    .sort(comparePayloadCandidates);
+  const readRefreshCandidate = async (
+    candidateList: readonly SnapshotCandidate[],
+  ): Promise<{ row: ParsedSnapshotRow | null; invalid: boolean }> => {
+    let invalid = false;
 
-  const artifactResult = readParsedPayloadCandidateFromRow({
-    db,
-    now,
-    row: await readRefreshSnapshotRowByKey(db, SNAPSHOT_ARTIFACT_KEY),
-  });
+    for (const candidate of candidateList) {
+      const row = await readRefreshSnapshotRowByKey(db, candidate.key);
+      if (!row) {
+        continue;
+      }
 
-  const freshestSameDayBase = pickPreferredSnapshotRow(
-    payloadResult.row,
-    artifactResult.row,
-    (row) => isSameUtcDay(row.generatedAt, now),
+      const liveCandidate: SnapshotCandidate = {
+        key: candidate.key,
+        generatedAt: row.generated_at,
+        updatedAt: toSnapshotUpdatedAt(row),
+      };
+      if (isFutureSnapshotCandidate(liveCandidate, now)) {
+        invalid = true;
+        continue;
+      }
+
+      const dbCached = readCachedParsedSnapshotRow(
+        parsedHomepagePayloadCacheByDb,
+        db,
+        liveCandidate,
+        row.body_json,
+      );
+      if (dbCached) {
+        return { row: dbCached, invalid };
+      }
+
+      const globalCached = readCachedParsedSnapshotRowGlobal(
+        parsedHomepagePayloadCacheGlobal,
+        liveCandidate,
+        row.body_json,
+      );
+      if (globalCached) {
+        return {
+          row: writeCachedParsedSnapshotRow(
+            parsedHomepagePayloadCacheByDb,
+            db,
+            liveCandidate,
+            row.body_json,
+            globalCached.snapshot,
+          ),
+          invalid,
+        };
+      }
+
+      const snapshot = parseHomepagePayloadSnapshotForKey(liveCandidate.key, row.body_json);
+      if (!snapshot) {
+        invalid = true;
+        continue;
+      }
+
+      writeCachedParsedSnapshotRowGlobal(
+        parsedHomepagePayloadCacheGlobal,
+        liveCandidate,
+        row.body_json,
+        snapshot,
+      );
+
+      return {
+        row: writeCachedParsedSnapshotRow(
+          parsedHomepagePayloadCacheByDb,
+          db,
+          liveCandidate,
+          row.body_json,
+          snapshot,
+        ),
+        invalid,
+      };
+    }
+
+    return { row: null, invalid };
+  };
+
+  const { row: sameDayBase, invalid: sameDayInvalid } = await readRefreshCandidate(
+    candidates.filter((candidate) => isSameUtcDay(candidate.generatedAt, now)),
   );
-  if (freshestSameDayBase) {
+  if (sameDayBase) {
     return {
-      generatedAt: freshestSameDayBase.row.generatedAt,
-      snapshot: freshestSameDayBase.row.snapshot,
+      generatedAt: sameDayBase.generatedAt,
+      snapshot: sameDayBase.snapshot,
       seedDataSnapshot: false,
     };
   }
 
-  const freshestBase = pickPreferredSnapshotRow(payloadResult.row, artifactResult.row);
+  const { row: freshestBase, invalid: freshestInvalid } = await readRefreshCandidate(candidates);
   if (freshestBase) {
     return {
-      generatedAt: freshestBase.row.generatedAt,
-      snapshot: freshestBase.row.snapshot,
+      generatedAt: freshestBase.generatedAt,
+      snapshot: freshestBase.snapshot,
       seedDataSnapshot: true,
     };
   }
 
-  if (!payloadResult.invalid && !artifactResult.invalid) {
+  if (candidates.length === 0) {
     return {
       generatedAt: null,
       snapshot: null,
@@ -799,7 +773,7 @@ export async function readHomepageRefreshBaseSnapshot(
     };
   }
 
-  if (payloadResult.invalid || artifactResult.invalid) {
+  if (sameDayInvalid || freshestInvalid) {
     console.warn('homepage snapshot: invalid refresh payload');
   }
 
