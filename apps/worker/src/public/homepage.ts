@@ -47,6 +47,8 @@ import {
 const PREVIEW_BATCH_LIMIT = 50;
 const UPTIME_DAYS = 30;
 const HEARTBEAT_POINTS = 60;
+const HOMEPAGE_FAST_PATCH_BASE_MAX_AGE_SECONDS = 75;
+const HOMEPAGE_FAST_PATCH_UPDATE_GRACE_SECONDS = 15;
 
 type IncidentSummary = PublicHomepageResponse['active_incidents'][number];
 type MaintenancePreview = NonNullable<PublicHomepageResponse['maintenance_history_preview']>;
@@ -180,13 +182,11 @@ export function parseHomepageSnapshotBodyJson(
   }
 }
 
-function canReuseStaticHomepageSections(snapshot: PublicHomepageResponse): boolean {
+function canPatchHomepageFromRuntime(snapshot: PublicHomepageResponse): boolean {
   return (
     snapshot.active_incidents.length === 0 &&
     snapshot.maintenance_windows.active.length === 0 &&
-    snapshot.maintenance_windows.upcoming.length === 0 &&
-    snapshot.resolved_incident_preview === null &&
-    snapshot.maintenance_history_preview === null
+    snapshot.maintenance_windows.upcoming.length === 0
   );
 }
 
@@ -1470,6 +1470,58 @@ function cloneHomepageMonitorCard(monitor: HomepageMonitorCard): HomepageMonitor
   };
 }
 
+function sameIncidentSummary(
+  left: IncidentSummary | null | undefined,
+  right: IncidentSummary | null | undefined,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+
+  return (
+    left.id === right.id &&
+    left.title === right.title &&
+    left.status === right.status &&
+    left.impact === right.impact &&
+    left.message === right.message &&
+    left.started_at === right.started_at &&
+    left.resolved_at === right.resolved_at
+  );
+}
+
+function sameMaintenancePreview(
+  left: MaintenancePreview | null | undefined,
+  right: MaintenancePreview | null | undefined,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  if (
+    left.id !== right.id ||
+    left.title !== right.title ||
+    left.message !== right.message ||
+    left.starts_at !== right.starts_at ||
+    left.ends_at !== right.ends_at ||
+    left.monitor_ids.length !== right.monitor_ids.length
+  ) {
+    return false;
+  }
+
+  for (let index = 0; index < left.monitor_ids.length; index += 1) {
+    if (left.monitor_ids[index] !== right.monitor_ids[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function computePatchedHomepageSegmentTotals(opts: {
   status: HomepageMonitorStatus;
   isStale: boolean;
@@ -1549,7 +1601,10 @@ export function tryPatchPublicHomepagePayloadFromRuntimeUpdates(opts: {
   updates: MonitorRuntimeUpdate[];
 }): PublicHomepageResponse | null {
   const { baseSnapshot, now, updates } = opts;
-  if (!baseSnapshot || !canReuseStaticHomepageSections(baseSnapshot)) {
+  if (!baseSnapshot || !canPatchHomepageFromRuntime(baseSnapshot)) {
+    return null;
+  }
+  if (Math.max(0, now - baseSnapshot.generated_at) > HOMEPAGE_FAST_PATCH_BASE_MAX_AGE_SECONDS) {
     return null;
   }
   if (updates.length === 0 || updates.length !== baseSnapshot.monitors.length) {
@@ -1583,6 +1638,16 @@ export function tryPatchPublicHomepagePayloadFromRuntimeUpdates(opts: {
       return null;
     }
     if (monitor.last_checked_at !== null && update.checked_at <= monitor.last_checked_at) {
+      return null;
+    }
+    if (
+      monitor.last_checked_at !== null &&
+      update.checked_at - monitor.last_checked_at >
+        Math.max(
+          HOMEPAGE_FAST_PATCH_BASE_MAX_AGE_SECONDS,
+          update.interval_sec + HOMEPAGE_FAST_PATCH_UPDATE_GRACE_SECONDS,
+        )
+    ) {
       return null;
     }
 
@@ -1834,7 +1899,7 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
 }): Promise<PublicHomepageResponse | null> {
   const baseSnapshot =
     opts.baseSnapshot ?? parseHomepageSnapshotBodyJson(opts.baseSnapshotBodyJson);
-  if (!baseSnapshot || !canReuseStaticHomepageSections(baseSnapshot)) {
+  if (!baseSnapshot || !canPatchHomepageFromRuntime(baseSnapshot)) {
     return null;
   }
 
@@ -1852,11 +1917,33 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
   if (
     guardState.hasActiveIncidents ||
     guardState.hasActiveMaintenance ||
-    guardState.hasUpcomingMaintenance ||
-    guardState.hasResolvedIncidentPreview ||
-    guardState.hasMaintenanceHistoryPreview
+    guardState.hasUpcomingMaintenance
   ) {
     return null;
+  }
+  if (
+    guardState.hasResolvedIncidentPreview ||
+    guardState.hasMaintenanceHistoryPreview ||
+    baseSnapshot.resolved_incident_preview !== null ||
+    baseSnapshot.maintenance_history_preview !== null
+  ) {
+    const historyPreviews = await withTraceAsync(
+      opts.trace,
+      'homepage_refresh_fast_history_previews',
+      async () => await readHomepageHistoryPreviews(opts.db, opts.now, opts.trace),
+    );
+    if (
+      !sameIncidentSummary(
+        baseSnapshot.resolved_incident_preview,
+        historyPreviews.resolvedIncidentPreview,
+      ) ||
+      !sameMaintenancePreview(
+        baseSnapshot.maintenance_history_preview,
+        historyPreviews.maintenanceHistoryPreview,
+      )
+    ) {
+      return null;
+    }
   }
   if (
     !hasCompatibleBaseSnapshotMonitorMetadataStamp(baseSnapshot, guardState.monitorMetadataStamp)

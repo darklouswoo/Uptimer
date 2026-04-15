@@ -121,9 +121,42 @@ describe('pages homepage worker', () => {
   });
 
   it('falls back to the cached injected homepage when snapshot fetch fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-02-17T00:10:00.000Z'));
+
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      installDefaultCacheMock((request) =>
+        request.url === 'https://status.example.com/'
+          ? new Response('<html>fallback homepage</html>', {
+              status: 200,
+              headers: { 'X-Uptimer-Generated-At': String(nowSec - 120) },
+            })
+          : undefined,
+      );
+      const env = makeEnv();
+      globalThis.fetch = vi.fn(async () => {
+        throw new Error('network failed');
+      }) as never;
+
+      const res = await pageWorker.fetch(
+        new Request('https://status.example.com/', {
+          headers: { Accept: 'text/html' },
+        }),
+        env,
+        { waitUntil: vi.fn() },
+      );
+
+      expect(await res.text()).toContain('fallback homepage');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not serve an over-stale cached homepage when snapshot fetch fails', async () => {
     installDefaultCacheMock((request) =>
       request.url === 'https://status.example.com/'
-        ? new Response('<html>fallback homepage</html>', {
+        ? new Response('<html>stale fallback homepage</html>', {
             status: 200,
             headers: { 'X-Uptimer-Generated-At': '0' },
           })
@@ -142,7 +175,9 @@ describe('pages homepage worker', () => {
       { waitUntil: vi.fn() },
     );
 
-    expect(await res.text()).toContain('fallback homepage');
+    const html = await res.text();
+    expect(html).not.toContain('stale fallback homepage');
+    expect(html).toContain('<div id="root"></div>');
   });
 
   it('injects the precomputed homepage artifact and updates the html cache on success', async () => {

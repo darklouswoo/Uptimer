@@ -7,6 +7,8 @@ import type { CheckOutcome } from '../monitor/types';
 import type { WebhookChannel } from '../notify/webhook';
 
 const MAINTENANCE_EVENT_LOOKBACK_SECONDS = 10 * 60;
+const D1_MAX_SQL_VARIABLES = 100;
+const MAINTENANCE_SUPPRESSED_MONITOR_IDS_BATCH_SIZE = D1_MAX_SQL_VARIABLES - 1;
 const LIST_ACTIVE_WEBHOOK_CHANNELS_SQL = `
   SELECT id, name, config_json, created_at
   FROM notification_channels
@@ -117,20 +119,38 @@ export async function listMaintenanceSuppressedMonitorIds(
   const ids = [...new Set(monitorIds)];
   if (ids.length === 0) return new Set();
 
-  const placeholders = ids.map((_, idx) => `?${idx + 2}`).join(', ');
-  const sql = `
-    SELECT DISTINCT mwm.monitor_id
-    FROM maintenance_window_monitors mwm
-    JOIN maintenance_windows mw ON mw.id = mwm.maintenance_window_id
-    WHERE mw.starts_at <= ?1 AND mw.ends_at > ?1
-      AND mwm.monitor_id IN (${placeholders})
-  `;
+  try {
+    const suppressed = new Set<number>();
 
-  const { results } = await db
-    .prepare(sql)
-    .bind(at, ...ids)
-    .all<{ monitor_id: number }>();
-  return new Set((results ?? []).map((r) => r.monitor_id));
+    for (
+      let index = 0;
+      index < ids.length;
+      index += MAINTENANCE_SUPPRESSED_MONITOR_IDS_BATCH_SIZE
+    ) {
+      const chunk = ids.slice(index, index + MAINTENANCE_SUPPRESSED_MONITOR_IDS_BATCH_SIZE);
+      const placeholders = chunk.map((_, idx) => `?${idx + 2}`).join(', ');
+      const sql = `
+        SELECT DISTINCT mwm.monitor_id
+        FROM maintenance_window_monitors mwm
+        JOIN maintenance_windows mw ON mw.id = mwm.maintenance_window_id
+        WHERE mw.starts_at <= ?1 AND mw.ends_at > ?1
+          AND mwm.monitor_id IN (${placeholders})
+      `;
+
+      const { results } = await db
+        .prepare(sql)
+        .bind(at, ...chunk)
+        .all<{ monitor_id: number }>();
+      for (const row of results ?? []) {
+        suppressed.add(row.monitor_id);
+      }
+    }
+
+    return suppressed;
+  } catch (err) {
+    console.warn('notify: failed to list maintenance-suppressed monitor ids', err);
+    return new Set();
+  }
 }
 
 async function listMaintenanceWindowMonitorIdsByWindowId(

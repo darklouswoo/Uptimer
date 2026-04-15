@@ -71,10 +71,14 @@ export type MonitorRuntimeUpdate = {
   interval_sec: number;
   created_at: number;
   checked_at: number;
-  check_status: string | null;
-  next_status: string | null;
+  check_status: 'up' | 'down' | 'maintenance' | 'paused' | 'unknown' | null;
+  next_status: 'up' | 'down' | 'maintenance' | 'paused' | 'unknown' | null;
   latency_ms: number | null;
 };
+
+const monitorRuntimeUpdateStatusSchema = z
+  .enum(['up', 'down', 'maintenance', 'paused', 'unknown'])
+  .nullable();
 
 export function normalizeRuntimeUpdateLatencyMs(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -88,8 +92,8 @@ export const monitorRuntimeUpdateSchema = z.object({
   interval_sec: z.number().int().positive(),
   created_at: z.number().int().nonnegative(),
   checked_at: z.number().int().nonnegative(),
-  check_status: z.string().nullable(),
-  next_status: z.string().nullable(),
+  check_status: monitorRuntimeUpdateStatusSchema,
+  next_status: monitorRuntimeUpdateStatusSchema,
   latency_ms: z.preprocess(
     (value) =>
       value === null || value === undefined ? null : normalizeRuntimeUpdateLatencyMs(value),

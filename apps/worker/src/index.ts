@@ -7,11 +7,34 @@ import type { CompletedDueMonitor } from './scheduler/scheduled';
 
 const HOMEPAGE_REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
 const HOMEPAGE_REFRESH_LOCK_LEASE_SECONDS = 55;
+const INTERNAL_REQUEST_MAX_BYTES = 256 * 1024;
 
 function normalizeTruthyHeader(value: string | null): boolean {
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function readBearerToken(authHeader: string | null): string | null {
+  if (!authHeader) return null;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] ?? null;
+}
+
+function hasValidInternalAuth(request: Request, env: Env): boolean {
+  if (!env.ADMIN_TOKEN) {
+    return false;
+  }
+  return readBearerToken(request.headers.get('Authorization')) === env.ADMIN_TOKEN;
+}
+
+function isRequestBodyTooLarge(request: Request): boolean {
+  const raw = request.headers.get('Content-Length');
+  if (!raw) {
+    return false;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > INTERNAL_REQUEST_MAX_BYTES;
 }
 
 function isScheduledRefreshRequest(request: Request): boolean {
@@ -33,12 +56,12 @@ function buildInternalRefreshResponse(ok: boolean, refreshed: boolean): Response
 }
 
 const internalRefreshJsonBodySchema = z.object({
-  token: z.string(),
+  token: z.string().optional(),
   runtime_updates: z.array(monitorRuntimeUpdateSchema).optional(),
 });
 
 const internalScheduledCheckBatchJsonBodySchema = z.object({
-  token: z.string(),
+  token: z.string().optional(),
   ids: z.array(z.number().int().positive()).min(1),
   checked_at: z.number().int().nonnegative(),
   suppressed_monitor_ids: z.array(z.number().int().positive()).optional(),
@@ -78,8 +101,13 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
   }
+  if (!hasValidInternalAuth(request, env)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (isRequestBodyTooLarge(request)) {
+    return new Response('Payload Too Large', { status: 413 });
+  }
 
-  let token = '';
   let runtimeUpdates: MonitorRuntimeUpdate[] | undefined;
   const contentType = request.headers.get('Content-Type') ?? '';
 
@@ -91,14 +119,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       return new Response('Forbidden', { status: 403 });
     }
 
-    token = parsedBody.data.token.trim();
     runtimeUpdates = parsedBody.data.runtime_updates;
-  } else {
-    token = (await request.text()).trim();
-  }
-
-  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
-    return new Response('Forbidden', { status: 403 });
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -255,13 +276,11 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
             baseSnapshot: baseSnapshot.snapshot,
             baseSnapshotBodyJson: null,
           });
-      const validatedPayload = trace
-        ? trace.time('homepage_refresh_validate', () =>
-            snapshotMod.toHomepageSnapshotPayload(computed),
-          )
-        : snapshotMod.toHomepageSnapshotPayload(computed);
-      payload = validatedPayload;
+      payload = computed;
     }
+    const validatedPayload = trace
+      ? trace.time('homepage_refresh_validate', () => snapshotMod.toHomepageSnapshotPayload(payload))
+      : snapshotMod.toHomepageSnapshotPayload(payload);
     if (trace) {
       await trace.timeAsync(
         'homepage_refresh_write',
@@ -269,7 +288,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
           await snapshotMod.writeHomepageSnapshot(
             env.DB,
             now,
-            payload,
+            validatedPayload,
             trace,
             baseSnapshot.seedDataSnapshot,
           ),
@@ -278,7 +297,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       await snapshotMod.writeHomepageSnapshot(
         env.DB,
         now,
-        payload,
+        validatedPayload,
         undefined,
         baseSnapshot.seedDataSnapshot,
       );
@@ -309,16 +328,17 @@ async function handleInternalScheduledCheckBatch(
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
   }
+  if (!hasValidInternalAuth(request, env)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (isRequestBodyTooLarge(request)) {
+    return new Response('Payload Too Large', { status: 413 });
+  }
 
   const parsedBody = internalScheduledCheckBatchJsonBodySchema.safeParse(
     await request.json().catch(() => null),
   );
   if (!parsedBody.success) {
-    return new Response('Forbidden', { status: 403 });
-  }
-
-  const token = parsedBody.data.token.trim();
-  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
     return new Response('Forbidden', { status: 403 });
   }
   const now = Math.floor(Date.now() / 1000);

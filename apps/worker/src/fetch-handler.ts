@@ -110,6 +110,9 @@ function rewritePublicRequest(req: Request): Request {
   } else if (url.pathname.startsWith(`${prefix}/`)) {
     url.pathname = url.pathname.slice(prefix.length);
   }
+  if (url.pathname.length > 1) {
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  }
   return new Request(url.toString(), req);
 }
 

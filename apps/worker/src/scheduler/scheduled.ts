@@ -23,11 +23,11 @@ import {
   type MonitorRuntimeUpdate,
 } from '../public/monitor-runtime';
 import { readSettings } from '../settings';
-import { acquireLease } from './lock';
+import { acquireLease, releaseLease } from './lock';
 import type { NotifyContext } from './notifications';
 
 const LOCK_NAME = 'scheduler:tick';
-const LOCK_LEASE_SECONDS = 55;
+const LOCK_LEASE_SECONDS = 135;
 const INTERNAL_SCHEDULED_BATCH_SIZE = 6;
 
 const CHECK_CONCURRENCY = 5;
@@ -118,6 +118,7 @@ async function refreshHomepageSnapshotViaService(
     new Request('http://internal/api/v1/internal/refresh/homepage', {
       method: 'POST',
       headers: {
+        Authorization: `Bearer ${env.ADMIN_TOKEN}`,
         'Content-Type': runtimeUpdates
           ? 'application/json; charset=utf-8'
           : 'text/plain; charset=utf-8',
@@ -215,6 +216,7 @@ async function runScheduledCheckBatchViaService(
     new Request('http://internal/api/v1/internal/scheduled/check-batch', {
       method: 'POST',
       headers: {
+        Authorization: `Bearer ${env.ADMIN_TOKEN}`,
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: JSON.stringify({
@@ -363,19 +365,40 @@ const PERSIST_STATEMENTS_SQL = {
   openOutageIfMissing: `
     INSERT INTO outages (monitor_id, started_at, ended_at, initial_error, last_error)
     SELECT ?1, ?2, NULL, ?3, ?4
-    WHERE NOT EXISTS (
-      SELECT 1 FROM outages WHERE monitor_id = ?5 AND ended_at IS NULL
+    WHERE EXISTS (
+      SELECT 1
+      FROM monitor_state
+      WHERE monitor_id = ?5
+        AND last_checked_at = ?6
+        AND status = 'down'
     )
+      AND NOT EXISTS (
+        SELECT 1 FROM outages WHERE monitor_id = ?7 AND ended_at IS NULL
+      )
   `,
   closeOutage: `
     UPDATE outages
     SET ended_at = ?1
     WHERE monitor_id = ?2 AND ended_at IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM monitor_state
+        WHERE monitor_id = ?2
+          AND last_checked_at = ?1
+          AND status != 'down'
+      )
   `,
   updateOutageLastError: `
     UPDATE outages
     SET last_error = ?1
     WHERE monitor_id = ?2 AND ended_at IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM monitor_state
+        WHERE monitor_id = ?2
+          AND last_checked_at = ?3
+          AND status = 'down'
+      )
   `,
 } as const;
 
@@ -623,12 +646,14 @@ function buildOutageStatements(
         checkError ?? 'down',
         checkError ?? 'down',
         row.id,
+        checkedAt,
+        row.id,
       ),
     );
   } else if (outageAction === 'close') {
     statements.push(templates.closeOutage.bind(checkedAt, row.id));
   } else if (outageAction === 'update' && checkError) {
-    statements.push(templates.updateOutageLastError.bind(checkError, row.id));
+    statements.push(templates.updateOutageLastError.bind(checkError, row.id, checkedAt));
   }
 
   return statements;
@@ -925,6 +950,7 @@ function chunkDueMonitorRows(rows: DueMonitorRow[], size: number): DueMonitorRow
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
+  const claimedLeaseExpiresAt = now + LOCK_LEASE_SECONDS;
   const totalStart = performance.now();
   const queueHomepageRefresh = (runtimeUpdates?: MonitorRuntimeUpdate[]) =>
     env.SELF
@@ -946,143 +972,151 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     return;
   }
 
-  const [settings, due, hasWebhookNotifications] = await Promise.all([
-    readSettings(env.DB),
-    listDueMonitors(env.DB, checkedAt),
-    hasActiveWebhookChannels(env.DB),
-  ]);
-  const setupDurMs = performance.now() - totalStart;
+  try {
+    const [settings, due, hasWebhookNotifications] = await Promise.all([
+      readSettings(env.DB),
+      listDueMonitors(env.DB, checkedAt),
+      hasActiveWebhookChannels(env.DB),
+    ]);
+    const setupDurMs = performance.now() - totalStart;
 
-  let notificationsModule: typeof import('./notifications') | null = null;
-  let notify: NotifyContext | null = null;
-  if (hasWebhookNotifications) {
-    notificationsModule = await import('./notifications');
-    notify = await notificationsModule.createNotifyContext(env, ctx);
-    if (notify) {
-      await notificationsModule.emitMaintenanceWindowNotifications(env, notify, now);
+    let notificationsModule: typeof import('./notifications') | null = null;
+    let notify: NotifyContext | null = null;
+    if (hasWebhookNotifications) {
+      notificationsModule = await import('./notifications');
+      notify = await notificationsModule.createNotifyContext(env, ctx);
+      if (notify) {
+        await notificationsModule.emitMaintenanceWindowNotifications(env, notify, now);
+      }
     }
-  }
 
-  const stateMachineConfig = {
-    failuresToDownFromUp: settings.state_failures_to_down_from_up,
-    successesToUpFromDown: settings.state_successes_to_up_from_down,
-  };
+    const stateMachineConfig = {
+      failuresToDownFromUp: settings.state_failures_to_down_from_up,
+      successesToUpFromDown: settings.state_successes_to_up_from_down,
+    };
 
-  if (due.length === 0) {
-    ctx.waitUntil(queueHomepageRefresh());
-    return;
-  }
+    if (due.length === 0) {
+      ctx.waitUntil(queueHomepageRefresh());
+      return;
+    }
 
-  // Maintenance suppression is monitor-scoped.
-  const dueMonitorIds = due.map((m) => m.id);
-  const suppressedMonitorIds =
-    notify === null || notificationsModule === null
-      ? new Set<number>()
-      : await notificationsModule.listMaintenanceSuppressedMonitorIds(env.DB, now, dueMonitorIds);
+    // Maintenance suppression is monitor-scoped.
+    const dueMonitorIds = due.map((m) => m.id);
+    const suppressedMonitorIds =
+      notify === null || notificationsModule === null
+        ? new Set<number>()
+        : await notificationsModule.listMaintenanceSuppressedMonitorIds(env.DB, now, dueMonitorIds);
 
-  const serviceBatchRows =
-    env.SELF && due.length > INTERNAL_SCHEDULED_BATCH_SIZE
-      ? chunkDueMonitorRows(due, INTERNAL_SCHEDULED_BATCH_SIZE)
-      : null;
+    const serviceBatchRows =
+      env.SELF && due.length > INTERNAL_SCHEDULED_BATCH_SIZE
+        ? chunkDueMonitorRows(due, INTERNAL_SCHEDULED_BATCH_SIZE)
+        : null;
 
-  const inlineNotificationHandler =
-    notificationsModule && notify
-      ? (completed: CompletedDueMonitor) =>
-          notificationsModule?.queueMonitorNotification(env, notify, completed)
-      : undefined;
+    const inlineNotificationHandler =
+      notificationsModule && notify
+        ? (completed: CompletedDueMonitor) =>
+            notificationsModule?.queueMonitorNotification(env, notify, completed)
+        : undefined;
 
-  let checksDurMs = 0;
-  let persistDurMs = 0;
-  let batchWallDurMs = 0;
-  let runtimeSnapshotDurMs = 0;
-  let runtimeUpdates: MonitorRuntimeUpdate[] = [];
-  const aggregateStats: MonitorBatchStats = {
-    processedCount: 0,
-    rejectedCount: 0,
-    attemptTotal: 0,
-    httpCount: 0,
-    tcpCount: 0,
-    assertionCount: 0,
-    downCount: 0,
-    unknownCount: 0,
-  };
+    let checksDurMs = 0;
+    let persistDurMs = 0;
+    let batchWallDurMs = 0;
+    let runtimeSnapshotDurMs = 0;
+    let runtimeUpdates: MonitorRuntimeUpdate[] = [];
+    const aggregateStats: MonitorBatchStats = {
+      processedCount: 0,
+      rejectedCount: 0,
+      attemptTotal: 0,
+      httpCount: 0,
+      tcpCount: 0,
+      assertionCount: 0,
+      downCount: 0,
+      unknownCount: 0,
+    };
 
-  if (serviceBatchRows) {
-    const batchesStart = performance.now();
-    const batchResults = await Promise.all(
-      serviceBatchRows.map(async (rows) => {
-        const ids = rows.map((row) => row.id);
-        const suppressedIds = ids.filter((id) => suppressedMonitorIds.has(id));
-        try {
-          return await runScheduledCheckBatchViaService(env, {
-            ids,
-            checkedAt,
-            suppressedMonitorIds: suppressedIds,
-            stateMachineConfig,
-            allowNotifications: Boolean(notificationsModule),
-          });
-        } catch (err) {
-          console.warn('scheduled: service batch failed, falling back inline', err);
-          return await runPersistedMonitorBatch({
-            db: env.DB,
-            rows,
-            checkedAt,
-            suppressedMonitorIds,
-            stateMachineConfig,
-            ...(inlineNotificationHandler ? { onPersistedMonitor: inlineNotificationHandler } : {}),
-          });
-        }
-      }),
-    );
-    batchWallDurMs = performance.now() - batchesStart;
+    if (serviceBatchRows) {
+      const batchesStart = performance.now();
+      const batchResults = await Promise.all(
+        serviceBatchRows.map(async (rows) => {
+          const ids = rows.map((row) => row.id);
+          const suppressedIds = ids.filter((id) => suppressedMonitorIds.has(id));
+          try {
+            return await runScheduledCheckBatchViaService(env, {
+              ids,
+              checkedAt,
+              suppressedMonitorIds: suppressedIds,
+              stateMachineConfig,
+              allowNotifications: Boolean(notificationsModule),
+            });
+          } catch (err) {
+            console.warn('scheduled: service batch failed, falling back inline', err);
+            return await runPersistedMonitorBatch({
+              db: env.DB,
+              rows,
+              checkedAt,
+              suppressedMonitorIds,
+              stateMachineConfig,
+              ...(inlineNotificationHandler
+                ? { onPersistedMonitor: inlineNotificationHandler }
+                : {}),
+            });
+          }
+        }),
+      );
+      batchWallDurMs = performance.now() - batchesStart;
 
-    for (const batch of batchResults) {
-      runtimeUpdates.push(...batch.runtimeUpdates);
-      checksDurMs += batch.checksDurMs;
-      persistDurMs += batch.persistDurMs;
+      for (const batch of batchResults) {
+        runtimeUpdates.push(...batch.runtimeUpdates);
+        checksDurMs += batch.checksDurMs;
+        persistDurMs += batch.persistDurMs;
+        mergeBatchStats(aggregateStats, batch.stats);
+      }
+    } else {
+      const batch = await runPersistedMonitorBatch({
+        db: env.DB,
+        rows: due,
+        checkedAt,
+        suppressedMonitorIds,
+        stateMachineConfig,
+        ...(inlineNotificationHandler ? { onPersistedMonitor: inlineNotificationHandler } : {}),
+      });
+      batchWallDurMs = batch.checksDurMs + batch.persistDurMs;
+      runtimeUpdates = batch.runtimeUpdates;
+      checksDurMs = batch.checksDurMs;
+      persistDurMs = batch.persistDurMs;
       mergeBatchStats(aggregateStats, batch.stats);
     }
-  } else {
-    const batch = await runPersistedMonitorBatch({
-      db: env.DB,
-      rows: due,
-      checkedAt,
-      suppressedMonitorIds,
-      stateMachineConfig,
-      ...(inlineNotificationHandler ? { onPersistedMonitor: inlineNotificationHandler } : {}),
+
+    runtimeUpdates = runtimeUpdates.sort((left, right) => left.monitor_id - right.monitor_id);
+
+    if (runtimeUpdates.length > 0) {
+      const runtimeSnapshotStart = performance.now();
+      await refreshPublicMonitorRuntimeSnapshot({
+        db: env.DB,
+        now,
+        updates: runtimeUpdates,
+        rebuild: async () => await rebuildPublicMonitorRuntimeSnapshot(env.DB, now),
+      });
+      runtimeSnapshotDurMs = performance.now() - runtimeSnapshotStart;
+    }
+
+    const batchMode = serviceBatchRows ? 'service' : 'inline';
+    const batchCount = serviceBatchRows?.length ?? 1;
+
+    if (aggregateStats.rejectedCount > 0) {
+      console.error(
+        `scheduled: ${aggregateStats.rejectedCount}/${due.length} monitors failed at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
+      );
+    } else {
+      console.log(
+        `scheduled: processed ${aggregateStats.processedCount} monitors at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
+      );
+    }
+
+    ctx.waitUntil(queueHomepageRefresh(runtimeUpdates));
+  } finally {
+    await releaseLease(env.DB, LOCK_NAME, claimedLeaseExpiresAt).catch((err) => {
+      console.warn('scheduled: failed to release lease', err);
     });
-    batchWallDurMs = batch.checksDurMs + batch.persistDurMs;
-    runtimeUpdates = batch.runtimeUpdates;
-    checksDurMs = batch.checksDurMs;
-    persistDurMs = batch.persistDurMs;
-    mergeBatchStats(aggregateStats, batch.stats);
   }
-
-  runtimeUpdates = runtimeUpdates.sort((left, right) => left.monitor_id - right.monitor_id);
-
-  if (runtimeUpdates.length > 0) {
-    const runtimeSnapshotStart = performance.now();
-    await refreshPublicMonitorRuntimeSnapshot({
-      db: env.DB,
-      now,
-      updates: runtimeUpdates,
-      rebuild: async () => await rebuildPublicMonitorRuntimeSnapshot(env.DB, now),
-    });
-    runtimeSnapshotDurMs = performance.now() - runtimeSnapshotStart;
-  }
-
-  const batchMode = serviceBatchRows ? 'service' : 'inline';
-  const batchCount = serviceBatchRows?.length ?? 1;
-
-  if (aggregateStats.rejectedCount > 0) {
-    console.error(
-      `scheduled: ${aggregateStats.rejectedCount}/${due.length} monitors failed at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
-    );
-  } else {
-    console.log(
-      `scheduled: processed ${aggregateStats.processedCount} monitors at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
-    );
-  }
-
-  ctx.waitUntil(queueHomepageRefresh(runtimeUpdates));
 }

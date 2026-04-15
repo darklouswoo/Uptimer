@@ -156,6 +156,7 @@ describe('internal homepage refresh route', () => {
       new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
+          Authorization: 'Bearer test-admin-token',
           'Content-Type': 'application/json; charset=utf-8',
           'X-Uptimer-Refresh-Source': 'scheduled',
         },
@@ -181,7 +182,7 @@ describe('internal homepage refresh route', () => {
     expect(res.status).toBe(200);
     expect(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates).toHaveBeenCalledTimes(1);
     expect(computePublicHomepagePayload).not.toHaveBeenCalled();
-    expect(toHomepageSnapshotPayload).not.toHaveBeenCalled();
+    expect(toHomepageSnapshotPayload).toHaveBeenCalledWith(fastPayload);
     expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, false);
     expect(
       vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates),
@@ -221,6 +222,7 @@ describe('internal homepage refresh route', () => {
       new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
+          Authorization: 'Bearer test-admin-token',
           'Content-Type': 'application/json; charset=utf-8',
           'X-Uptimer-Refresh-Source': 'scheduled',
         },
@@ -283,6 +285,7 @@ describe('internal homepage refresh route', () => {
       new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
+          Authorization: 'Bearer test-admin-token',
           'Content-Type': 'application/json; charset=utf-8',
           'X-Uptimer-Refresh-Source': 'scheduled',
         },

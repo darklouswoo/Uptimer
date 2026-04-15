@@ -17,7 +17,10 @@ describe('internal scheduled check-batch route', () => {
       worker.fetch(
         new Request('https://status.example.com/api/v1/internal/scheduled/check-batch', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          headers: {
+            Authorization: 'Bearer test-admin-token',
+            'Content-Type': 'application/json; charset=utf-8',
+          },
           body: JSON.stringify({
             token: 'test-admin-token',
             ids: [1],

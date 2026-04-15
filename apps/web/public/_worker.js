@@ -293,6 +293,10 @@ function computeCacheControl(ageSeconds) {
   return `public, max-age=${maxAge}, stale-while-revalidate=${stale}, stale-if-error=${stale}`;
 }
 
+function canServeCachedHomepageFallback(ageSeconds) {
+  return ageSeconds <= FALLBACK_HTML_MAX_AGE_SECONDS;
+}
+
 function buildHomepageCacheHit(cached, ageSeconds) {
   // In the Cloudflare runtime, cached/fetched Responses can have immutable headers.
   // Always rebuild before mutating.
@@ -557,11 +561,12 @@ export default {
         if (!artifact) {
           if (cached) {
             const cachedGeneratedAt = readGeneratedAtHeader(cached);
-            if (cachedGeneratedAt === null) {
-              if (trace) trace.setLabel('path', 'api_fail_cache_raw');
-              return finalizeTraceResponse(cached, trace);
-            }
-            const cachedAge = Math.max(0, now - cachedGeneratedAt);
+          if (cachedGeneratedAt === null) {
+            if (trace) trace.setLabel('path', 'api_fail_cache_raw');
+            return finalizeTraceResponse(cached, trace);
+          }
+          const cachedAge = Math.max(0, now - cachedGeneratedAt);
+          if (canServeCachedHomepageFallback(cachedAge)) {
             const hit = trace
               ? trace.time('cache_hit_build', () => buildHomepageCacheHit(cached, cachedAge))
               : buildHomepageCacheHit(cached, cachedAge);
@@ -571,9 +576,13 @@ export default {
             }
             return finalizeTraceResponse(hit, trace);
           }
+          if (trace) {
+            trace.setLabel('cache_stale_skip', cachedAge);
+          }
+        }
 
-          const headers = new Headers(base.headers);
-          headers.set('Content-Type', 'text/html; charset=utf-8');
+        const headers = new Headers(base.headers);
+        headers.set('Content-Type', 'text/html; charset=utf-8');
           headers.append('Vary', 'Accept');
           headers.delete('Location');
 
@@ -698,7 +707,10 @@ export default {
                 const now = Math.floor(Date.now() / 1000);
                 const cachedGeneratedAt = readGeneratedAtHeader(cached);
                 if (cachedGeneratedAt === null) return cached;
-                return buildHomepageCacheHit(cached, Math.max(0, now - cachedGeneratedAt));
+                const cachedAge = Math.max(0, now - cachedGeneratedAt);
+                if (canServeCachedHomepageFallback(cachedAge)) {
+                  return buildHomepageCacheHit(cached, cachedAge);
+                }
               }
             } catch {
               // ignore

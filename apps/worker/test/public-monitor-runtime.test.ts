@@ -127,6 +127,20 @@ describe('public/monitor-runtime', () => {
     });
   });
 
+  it('rejects invalid privileged runtime update statuses', () => {
+    expect(() =>
+      monitorRuntimeUpdateSchema.parse({
+        monitor_id: 1,
+        interval_sec: 60,
+        created_at: 0,
+        checked_at: 60,
+        check_status: 'degraded',
+        next_status: 'up',
+        latency_ms: 12,
+      }),
+    ).toThrow();
+  });
+
   it('ignores out-of-order updates for existing runtime entries', () => {
     const snapshot: PublicMonitorRuntimeSnapshot = {
       version: 1,

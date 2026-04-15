@@ -51,6 +51,7 @@ type SnapshotCandidate = {
 type NormalizedSnapshotRow = {
   generatedAt: number;
   updatedAt: number;
+  rawBodyJson: string;
   bodyJson: string;
 };
 
@@ -61,6 +62,7 @@ type RawNormalizedSnapshotRow = NormalizedSnapshotRow & {
 type ParsedSnapshotRow = {
   generatedAt: number;
   updatedAt: number;
+  rawBodyJson: string;
   snapshot: PublicHomepageResponse;
 };
 
@@ -246,6 +248,7 @@ function readCachedNormalizedSnapshotRow(
   cacheByDb: WeakMap<D1Database, Map<SnapshotKey, NormalizedSnapshotRow>>,
   db: D1Database,
   candidate: SnapshotCandidate,
+  rawBodyJson: string,
 ): NormalizedSnapshotRow | null {
   const cache = getNormalizedSnapshotCache(cacheByDb, db);
   const row = cache.get(candidate.key);
@@ -253,7 +256,9 @@ function readCachedNormalizedSnapshotRow(
     return null;
   }
 
-  return row.generatedAt === candidate.generatedAt && row.updatedAt === candidate.updatedAt
+  return row.generatedAt === candidate.generatedAt &&
+    row.updatedAt === candidate.updatedAt &&
+    row.rawBodyJson === rawBodyJson
     ? row
     : null;
 }
@@ -262,11 +267,13 @@ function writeCachedNormalizedSnapshotRow(
   cacheByDb: WeakMap<D1Database, Map<SnapshotKey, NormalizedSnapshotRow>>,
   db: D1Database,
   candidate: SnapshotCandidate,
+  rawBodyJson: string,
   bodyJson: string,
 ): NormalizedSnapshotRow {
   const row: NormalizedSnapshotRow = {
     generatedAt: candidate.generatedAt,
     updatedAt: candidate.updatedAt,
+    rawBodyJson,
     bodyJson,
   };
   getNormalizedSnapshotCache(cacheByDb, db).set(candidate.key, row);
@@ -277,6 +284,7 @@ function readCachedParsedSnapshotRow(
   cacheByDb: WeakMap<D1Database, Map<SnapshotKey, ParsedSnapshotRow>>,
   db: D1Database,
   candidate: SnapshotCandidate,
+  rawBodyJson: string,
 ): ParsedSnapshotRow | null {
   const cache = getParsedSnapshotCache(cacheByDb, db);
   const row = cache.get(candidate.key);
@@ -284,7 +292,9 @@ function readCachedParsedSnapshotRow(
     return null;
   }
 
-  return row.generatedAt === candidate.generatedAt && row.updatedAt === candidate.updatedAt
+  return row.generatedAt === candidate.generatedAt &&
+    row.updatedAt === candidate.updatedAt &&
+    row.rawBodyJson === rawBodyJson
     ? row
     : null;
 }
@@ -293,11 +303,13 @@ function writeCachedParsedSnapshotRow(
   cacheByDb: WeakMap<D1Database, Map<SnapshotKey, ParsedSnapshotRow>>,
   db: D1Database,
   candidate: SnapshotCandidate,
+  rawBodyJson: string,
   snapshot: PublicHomepageResponse,
 ): ParsedSnapshotRow {
   const row: ParsedSnapshotRow = {
     generatedAt: candidate.generatedAt,
     updatedAt: candidate.updatedAt,
+    rawBodyJson,
     snapshot,
   };
   getParsedSnapshotCache(cacheByDb, db).set(candidate.key, row);
@@ -437,7 +449,12 @@ function readValidatedSnapshotCandidateFromRefreshRows(opts: {
     return { row: null, invalid: false };
   }
 
-  const dbCached = readCachedNormalizedSnapshotRow(opts.cacheByDb, opts.db, opts.candidate);
+  const dbCached = readCachedNormalizedSnapshotRow(
+    opts.cacheByDb,
+    opts.db,
+    opts.candidate,
+    row.body_json,
+  );
   if (dbCached) {
     return { row: dbCached, invalid: false };
   }
@@ -453,6 +470,7 @@ function readValidatedSnapshotCandidateFromRefreshRows(opts: {
         opts.cacheByDb,
         opts.db,
         opts.candidate,
+        row.body_json,
         globalCached.bodyJson,
       ),
       invalid: false,
@@ -471,7 +489,13 @@ function readValidatedSnapshotCandidateFromRefreshRows(opts: {
     bodyJson,
   );
   return {
-    row: writeCachedNormalizedSnapshotRow(opts.cacheByDb, opts.db, opts.candidate, bodyJson),
+    row: writeCachedNormalizedSnapshotRow(
+      opts.cacheByDb,
+      opts.db,
+      opts.candidate,
+      row.body_json,
+      bodyJson,
+    ),
     invalid: false,
   };
 }
@@ -585,6 +609,7 @@ export async function readHomepageRefreshBaseSnapshot(
         parsedHomepagePayloadCacheByDb,
         db,
         candidate,
+        row.body_json,
       );
       if (dbCached) {
         return { row: dbCached, invalid };
@@ -601,6 +626,7 @@ export async function readHomepageRefreshBaseSnapshot(
             parsedHomepagePayloadCacheByDb,
             db,
             candidate,
+            row.body_json,
             globalCached.snapshot,
           ),
           invalid,
@@ -625,6 +651,7 @@ export async function readHomepageRefreshBaseSnapshot(
           parsedHomepagePayloadCacheByDb,
           db,
           candidate,
+          row.body_json,
           snapshot,
         ),
         invalid,
@@ -692,7 +719,13 @@ export function primeHomepageRefreshBaseSnapshotCache(opts: {
     opts.renderBodyJson,
     opts.snapshot,
   );
-  writeCachedParsedSnapshotRow(parsedHomepagePayloadCacheByDb, opts.db, artifactCandidate, opts.snapshot);
+  writeCachedParsedSnapshotRow(
+    parsedHomepagePayloadCacheByDb,
+    opts.db,
+    artifactCandidate,
+    opts.renderBodyJson,
+    opts.snapshot,
+  );
 
   if (!opts.payloadBodyJson) {
     return;
@@ -709,7 +742,13 @@ export function primeHomepageRefreshBaseSnapshotCache(opts: {
     opts.payloadBodyJson,
     opts.snapshot,
   );
-  writeCachedParsedSnapshotRow(parsedHomepagePayloadCacheByDb, opts.db, payloadCandidate, opts.snapshot);
+  writeCachedParsedSnapshotRow(
+    parsedHomepagePayloadCacheByDb,
+    opts.db,
+    payloadCandidate,
+    opts.payloadBodyJson,
+    opts.snapshot,
+  );
 }
 
 export function applyHomepageCacheHeaders(res: Response, ageSeconds: number): void {

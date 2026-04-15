@@ -656,6 +656,106 @@ describe('public homepage route', () => {
     });
   });
 
+  it('serves trailing-slash homepage requests when the hot snapshot path misses', async () => {
+    const now = 200;
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: 'from public_snapshots',
+        first: (args) =>
+          args[0] === 'status'
+            ? {
+                generated_at: 190,
+                body_json: JSON.stringify({
+                  generated_at: 190,
+                  site_title: 'Status Hub',
+                  site_description: 'Production services',
+                  site_locale: 'en',
+                  site_timezone: 'UTC',
+                  uptime_rating_level: 4,
+                  overall_status: 'up',
+                  banner: {
+                    source: 'monitors',
+                    status: 'operational',
+                    title: 'All Systems Operational',
+                    down_ratio: null,
+                  },
+                  summary: {
+                    up: 1,
+                    down: 0,
+                    maintenance: 0,
+                    paused: 0,
+                    unknown: 0,
+                  },
+                  monitors: [
+                    {
+                      id: 1,
+                      name: 'API',
+                      type: 'http',
+                      group_name: null,
+                      group_sort_order: 0,
+                      sort_order: 0,
+                      uptime_rating_level: 4,
+                      status: 'up',
+                      is_stale: false,
+                      last_checked_at: 180,
+                      last_latency_ms: 42,
+                      heartbeats: [{ checked_at: 180, status: 'up', latency_ms: 42 }],
+                      uptime_30d: {
+                        range_start_at: 0,
+                        range_end_at: 190,
+                        total_sec: 190,
+                        downtime_sec: 0,
+                        unknown_sec: 0,
+                        uptime_sec: 190,
+                        uptime_pct: 100,
+                      },
+                      uptime_days: [
+                        {
+                          day_start_at: 0,
+                          total_sec: 190,
+                          downtime_sec: 0,
+                          unknown_sec: 0,
+                          uptime_sec: 190,
+                          uptime_pct: 100,
+                        },
+                      ],
+                    },
+                  ],
+                  active_incidents: [],
+                  maintenance_windows: {
+                    active: [],
+                    upcoming: [],
+                  },
+                }),
+              }
+            : null,
+      },
+      {
+        match: 'from incidents',
+        all: () => [],
+      },
+      {
+        match: 'from maintenance_windows',
+        all: () => [],
+      },
+    ];
+
+    const res = await requestHomepageViaApp('/api/v1/public/homepage/', handlers);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      generated_at: 190,
+      monitor_count_total: 1,
+      monitors: [
+        {
+          id: 1,
+        },
+      ],
+    });
+  });
+
   it('returns 503 when no homepage snapshot is available', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(200_000);
 

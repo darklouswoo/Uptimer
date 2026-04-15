@@ -8,6 +8,7 @@ vi.mock('../src/monitor/tcp', () => ({
 }));
 vi.mock('../src/scheduler/lock', () => ({
   acquireLease: vi.fn(),
+  releaseLease: vi.fn(),
 }));
 vi.mock('../src/settings', () => ({
   readSettings: vi.fn(),
@@ -36,7 +37,7 @@ import { dispatchWebhookToChannels } from '../src/notify/webhook';
 import { computePublicHomepagePayload } from '../src/public/homepage';
 import { refreshPublicMonitorRuntimeSnapshot } from '../src/public/monitor-runtime';
 import { runScheduledTick } from '../src/scheduler/scheduled';
-import { acquireLease } from '../src/scheduler/lock';
+import { acquireLease, releaseLease } from '../src/scheduler/lock';
 import { refreshPublicHomepageSnapshotIfNeeded } from '../src/snapshots';
 import { readSettings } from '../src/settings';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
@@ -143,6 +144,7 @@ describe('scheduler/scheduled regression', () => {
     vi.setSystemTime(new Date('2026-02-17T00:00:42.000Z'));
 
     vi.mocked(acquireLease).mockResolvedValue(true);
+    vi.mocked(releaseLease).mockResolvedValue(undefined);
     vi.mocked(readSettings).mockResolvedValue({
       site_title: 'Uptimer',
       site_description: '',
@@ -226,7 +228,7 @@ describe('scheduler/scheduled regression', () => {
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
-    expect(acquireLease).toHaveBeenCalledWith(env.DB, 'scheduler:tick', expectedNow, 55);
+    expect(acquireLease).toHaveBeenCalledWith(env.DB, 'scheduler:tick', expectedNow, 135);
     expect(readSettings).toHaveBeenCalledTimes(1);
     expect(waitUntil).toHaveBeenCalledTimes(1);
     await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
@@ -262,6 +264,7 @@ describe('scheduler/scheduled regression', () => {
     expect(req).toBeInstanceOf(Request);
     expect(req.method).toBe('POST');
     expect(new URL(req.url).pathname).toBe('/api/v1/internal/refresh/homepage');
+    expect(req.headers.get('Authorization')).toBe('Bearer test-admin-token');
     expect(req.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
     await expect(req.text()).resolves.toBe('test-admin-token');
     expect(refreshPublicHomepageSnapshotIfNeeded).not.toHaveBeenCalled();
@@ -310,6 +313,7 @@ describe('scheduler/scheduled regression', () => {
 
     expect(selfFetch).toHaveBeenCalledTimes(1);
     const req = selfFetch.mock.calls[0]?.[0] as Request;
+    expect(req.headers.get('Authorization')).toBe('Bearer test-admin-token');
     expect(req.headers.get('Content-Type')).toContain('application/json');
     await expect(req.json()).resolves.toMatchObject({
       token: 'test-admin-token',

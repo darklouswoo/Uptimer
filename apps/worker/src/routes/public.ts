@@ -727,20 +727,24 @@ publicRoutes.get('/homepage', async (c) => {
       readStaleStatusSnapshot(c.env.DB, now, 10 * 60),
     );
     if (staleStatus) {
-      const payload = homepageFromStatusPayload(
-        toSnapshotPayload(staleStatus.data),
-        await historyPreviewsPromise.catch(() => ({
-          resolvedIncidentPreview: null,
-          maintenanceHistoryPreview: null,
-        })),
-      );
-      const res = c.json(payload);
-      applyHomepageCacheHeaders(res, Math.min(60, staleStatus.age));
-      trace.setLabel('path', 'stale_status');
-      trace.setLabel('age', staleStatus.age);
-      trace.finish('total');
-      applyTraceToResponse({ res, trace, prefix: 'w' });
-      return res;
+      try {
+        const payload = homepageFromStatusPayload(
+          toSnapshotPayload(staleStatus.data),
+          await historyPreviewsPromise.catch(() => ({
+            resolvedIncidentPreview: null,
+            maintenanceHistoryPreview: null,
+          })),
+        );
+        const res = c.json(payload);
+        applyHomepageCacheHeaders(res, Math.min(60, staleStatus.age));
+        trace.setLabel('path', 'stale_status');
+        trace.setLabel('age', staleStatus.age);
+        trace.finish('total');
+        applyTraceToResponse({ res, trace, prefix: 'w' });
+        return res;
+      } catch (staleStatusErr) {
+        console.warn('public homepage: stale status snapshot invalid', staleStatusErr);
+      }
     }
 
     const staleArtifact = await trace.timeAsync('homepage_artifact_stale_wait', () =>
