@@ -188,7 +188,7 @@ describe('pages homepage worker', () => {
         JSON.stringify({
           generated_at: 1_728_000_000,
           preload_html: '<div id="uptimer-preload"><main>artifact preload</main></div>',
-          snapshot: { site_title: 'Status Hub' },
+          snapshot_json: JSON.stringify({ site_title: 'Status Hub' }),
           meta_title: 'Status Hub',
           meta_description: 'Production',
         }),
@@ -228,7 +228,7 @@ describe('pages homepage worker', () => {
         JSON.stringify({
           generated_at: 1_728_000_000,
           preload_html: '<div id="uptimer-preload"><main>artifact preload</main></div>',
-          snapshot: { site_title: 'Status Hub' },
+          snapshot_json: JSON.stringify({ site_title: 'Status Hub' }),
           meta_title: 'Status Hub',
           meta_description: 'Production',
         }),

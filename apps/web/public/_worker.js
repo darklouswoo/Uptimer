@@ -229,6 +229,29 @@ function normalizeSnapshotText(value, fallback) {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+function normalizeHomepageArtifactPayload(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (typeof data.preload_html !== 'string') return null;
+
+  let snapshotInlineJson = null;
+  if (typeof data.snapshot_json === 'string') {
+    const trimmed = data.snapshot_json.trim();
+    snapshotInlineJson = trimmed.length > 0 ? trimmed : null;
+  } else if (data.snapshot && typeof data.snapshot === 'object') {
+    snapshotInlineJson = safeJsonForInlineScript(data.snapshot);
+  }
+
+  if (!snapshotInlineJson) return null;
+
+  return {
+    generated_at: typeof data.generated_at === 'number' ? data.generated_at : null,
+    preload_html: data.preload_html,
+    meta_title: typeof data.meta_title === 'string' ? data.meta_title : '',
+    meta_description: typeof data.meta_description === 'string' ? data.meta_description : '',
+    snapshot_inline_json: snapshotInlineJson,
+  };
+}
+
 const HOMEPAGE_PRELOAD_STYLE_TAG = `<style id="uptimer-preload-style">
 #uptimer-preload{min-height:100vh;background:#f8fafc;color:#0f172a;font:400 14px/1.45 ui-sans-serif,system-ui,sans-serif}
 #uptimer-preload *{box-sizing:border-box}
@@ -437,12 +460,7 @@ async function fetchPublicHomepageArtifact(env, trace) {
     const data = trace
       ? await trace.timeAsync('api_json', () => resp.json())
       : await resp.json();
-    if (!data || typeof data !== 'object') return null;
-
-    if (typeof data.preload_html !== 'string') return null;
-    if (!data.snapshot || typeof data.snapshot !== 'object') return null;
-
-    return data;
+    return normalizeHomepageArtifactPayload(data);
   } catch {
     return null;
   } finally {
@@ -597,9 +615,7 @@ export default {
           typeof artifact.generated_at === 'number' ? artifact.generated_at : now;
         const age = Math.max(0, now - generatedAt);
 
-        const snapshotInlineJson = trace
-          ? trace.time('snapshot_inline_json', () => safeJsonForInlineScript(artifact.snapshot))
-          : safeJsonForInlineScript(artifact.snapshot);
+        const snapshotInlineJson = artifact.snapshot_inline_json;
 
         let injected = trace
           ? trace.time('inject_root', () =>

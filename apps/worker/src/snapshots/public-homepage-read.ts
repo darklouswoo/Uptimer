@@ -1,7 +1,7 @@
 import { AppError } from '../middleware/errors';
 import {
-  publicHomepageRenderArtifactSchema,
   publicHomepageResponseSchema,
+  publicHomepageStoredRenderArtifactSchema,
   type PublicHomepageResponse,
 } from '../schemas/public-homepage';
 
@@ -139,6 +139,24 @@ function parseDirectHomepagePayload(value: unknown): PublicHomepageResponse | nu
   return normalizedPayload.success ? normalizedPayload.data : null;
 }
 
+function parseStoredHomepageRenderArtifactSnapshot(value: unknown): PublicHomepageResponse | null {
+  const artifact = publicHomepageStoredRenderArtifactSchema.safeParse(value);
+  if (!artifact.success) {
+    return null;
+  }
+
+  if ('snapshot' in artifact.data) {
+    return artifact.data.snapshot;
+  }
+
+  const parsedSnapshot = parseJsonText(artifact.data.snapshot_json);
+  if (parsedSnapshot === null) {
+    return null;
+  }
+
+  return parseDirectHomepagePayload(parsedSnapshot.value);
+}
+
 function normalizeHomepagePayloadBodyJsonForKey(
   key: SnapshotKey,
   bodyJson: string,
@@ -162,9 +180,9 @@ function normalizeHomepagePayloadBodyJsonForKey(
     }
   }
 
-  const artifactSnapshot = publicHomepageResponseSchema.safeParse(parsed.value.snapshot);
-  if (artifactSnapshot.success) {
-    return JSON.stringify(artifactSnapshot.data);
+  const artifactSnapshot = parseStoredHomepageRenderArtifactSnapshot(parsed.value);
+  if (artifactSnapshot) {
+    return JSON.stringify(artifactSnapshot);
   }
 
   return key === SNAPSHOT_KEY ? null : normalizeDirectHomepagePayload(parsed.value);
@@ -174,8 +192,11 @@ function normalizeHomepageArtifactBodyJson(bodyJson: string): string | null {
   const parsed = parseJsonText(bodyJson);
   if (parsed === null) return null;
 
-  const artifact = publicHomepageRenderArtifactSchema.safeParse(parsed.value);
+  const artifact = publicHomepageStoredRenderArtifactSchema.safeParse(parsed.value);
   if (artifact.success) {
+    if (!('snapshot' in artifact.data) && !parseStoredHomepageRenderArtifactSnapshot(artifact.data)) {
+      return null;
+    }
     return parsed.trimmed;
   }
   if (!isRecord(parsed.value)) {
@@ -187,8 +208,17 @@ function normalizeHomepageArtifactBodyJson(bodyJson: string): string | null {
     return null;
   }
 
-  const legacyArtifact = publicHomepageRenderArtifactSchema.safeParse(parsed.value.render);
-  return legacyArtifact.success ? JSON.stringify(legacyArtifact.data) : null;
+  const legacyArtifact = publicHomepageStoredRenderArtifactSchema.safeParse(parsed.value.render);
+  if (!legacyArtifact.success) {
+    return null;
+  }
+  if (
+    !('snapshot' in legacyArtifact.data) &&
+    !parseStoredHomepageRenderArtifactSnapshot(legacyArtifact.data)
+  ) {
+    return null;
+  }
+  return JSON.stringify(legacyArtifact.data);
 }
 
 function parseHomepagePayloadSnapshotForKey(
@@ -213,9 +243,9 @@ function parseHomepagePayloadSnapshotForKey(
     }
   }
 
-  const artifactSnapshot = publicHomepageResponseSchema.safeParse(parsed.value.snapshot);
-  if (artifactSnapshot.success) {
-    return artifactSnapshot.data;
+  const artifactSnapshot = parseStoredHomepageRenderArtifactSnapshot(parsed.value);
+  if (artifactSnapshot) {
+    return artifactSnapshot;
   }
 
   return key === SNAPSHOT_KEY ? null : parseDirectHomepagePayload(parsed.value);

@@ -3,10 +3,11 @@ import type { Trace } from '../observability/trace';
 import { acquireLease } from '../scheduler/lock';
 import { primeHomepageRefreshBaseSnapshotCache } from './public-homepage-read';
 import {
-  publicHomepageRenderArtifactSchema,
   publicHomepageResponseSchema,
   type PublicHomepageRenderArtifact,
   type PublicHomepageResponse,
+  publicHomepageStoredRenderArtifactSchema,
+  type StoredPublicHomepageRenderArtifact,
 } from '../schemas/public-homepage';
 
 const SNAPSHOT_KEY = 'homepage';
@@ -343,12 +344,17 @@ function renderPreload(
 
 export function buildHomepageRenderArtifact(
   snapshot: PublicHomepageResponse,
-): PublicHomepageRenderArtifact {
+  snapshotBodyJson?: string,
+): StoredPublicHomepageRenderArtifact {
   const fullSnapshot: PublicHomepageResponse = {
     ...snapshot,
     bootstrap_mode: 'full',
     monitor_count_total: snapshot.monitors.length,
   };
+  const canReuseSnapshotBodyJson =
+    snapshotBodyJson !== undefined &&
+    snapshot.bootstrap_mode === 'full' &&
+    snapshot.monitor_count_total === snapshot.monitors.length;
   const needsMonitorNames =
     fullSnapshot.maintenance_windows.active.length > 0 ||
     fullSnapshot.maintenance_windows.upcoming.length > 0 ||
@@ -368,7 +374,7 @@ export function buildHomepageRenderArtifact(
   return {
     generated_at: fullSnapshot.generated_at,
     preload_html: `<div id="uptimer-preload">${renderPreload(fullSnapshot, allMonitorNames)}</div>`,
-    snapshot: fullSnapshot,
+    snapshot_json: canReuseSnapshotBodyJson ? snapshotBodyJson : JSON.stringify(fullSnapshot),
     meta_title: metaTitle,
     meta_description: metaDescription,
   };
@@ -394,9 +400,12 @@ function normalizeDirectHomepagePayload(value: unknown): PublicHomepageResponse 
 }
 
 function readStoredHomepageSnapshotData(value: unknown): PublicHomepageResponse | null {
-  const artifact = publicHomepageRenderArtifactSchema.safeParse(value);
+  const artifact = publicHomepageStoredRenderArtifactSchema.safeParse(value);
   if (artifact.success) {
-    return artifact.data.snapshot;
+    if ('snapshot' in artifact.data) {
+      return artifact.data.snapshot;
+    }
+    return readStoredHomepageSnapshotData(safeJsonParse(artifact.data.snapshot_json));
   }
 
   if (!isRecord(value)) return null;
@@ -410,9 +419,22 @@ function readStoredHomepageSnapshotData(value: unknown): PublicHomepageResponse 
 }
 
 function readStoredHomepageSnapshotRender(value: unknown): PublicHomepageRenderArtifact | null {
-  const artifact = publicHomepageRenderArtifactSchema.safeParse(value);
+  const artifact = publicHomepageStoredRenderArtifactSchema.safeParse(value);
   if (artifact.success) {
-    return artifact.data;
+    if ('snapshot' in artifact.data) {
+      return artifact.data;
+    }
+    const snapshot = readStoredHomepageSnapshotData(safeJsonParse(artifact.data.snapshot_json));
+    if (!snapshot) {
+      return null;
+    }
+    return {
+      generated_at: artifact.data.generated_at,
+      preload_html: artifact.data.preload_html,
+      snapshot,
+      meta_title: artifact.data.meta_title,
+      meta_description: artifact.data.meta_description,
+    };
   }
 
   if (!isRecord(value)) return null;
@@ -421,8 +443,8 @@ function readStoredHomepageSnapshotRender(value: unknown): PublicHomepageRenderA
     return null;
   }
 
-  const legacyRender = publicHomepageRenderArtifactSchema.safeParse(value.render);
-  return legacyRender.success ? legacyRender.data : null;
+  const legacyRender = publicHomepageStoredRenderArtifactSchema.safeParse(value.render);
+  return legacyRender.success ? readStoredHomepageSnapshotRender(legacyRender.data) : null;
 }
 
 function safeJsonParse(text: string): unknown | null {
@@ -492,8 +514,34 @@ function normalizeHomepageArtifactBodyJson(bodyJson: string): string | null {
     return null;
   }
 
-  const render = readStoredHomepageSnapshotRender(parsed);
-  return render ? JSON.stringify(render) : null;
+  const directArtifact = publicHomepageStoredRenderArtifactSchema.safeParse(parsed);
+  if (directArtifact.success) {
+    if (!('snapshot' in directArtifact.data) && !readStoredHomepageSnapshotData(safeJsonParse(directArtifact.data.snapshot_json))) {
+      return null;
+    }
+    return JSON.stringify(directArtifact.data);
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const version = parsed.version;
+  if (version !== SPLIT_SNAPSHOT_VERSION && version !== LEGACY_COMBINED_SNAPSHOT_VERSION) {
+    return null;
+  }
+
+  const legacyArtifact = publicHomepageStoredRenderArtifactSchema.safeParse(parsed.render);
+  if (!legacyArtifact.success) {
+    return null;
+  }
+  if (
+    !('snapshot' in legacyArtifact.data) &&
+    !readStoredHomepageSnapshotData(safeJsonParse(legacyArtifact.data.snapshot_json))
+  ) {
+    return null;
+  }
+  return JSON.stringify(legacyArtifact.data);
 }
 
 function readSnapshotValueFromRows<T>(opts: {
@@ -737,11 +785,11 @@ export async function writeHomepageSnapshot(
   trace?: Trace,
   _seedDataSnapshot = false,
 ): Promise<void> {
-  const render = withTraceSync(trace, 'homepage_write_render', () =>
-    buildHomepageRenderArtifact(payload),
-  );
   const payloadBodyJson = withTraceSync(trace, 'homepage_write_stringify_payload', () =>
     JSON.stringify(payload),
+  );
+  const render = withTraceSync(trace, 'homepage_write_render', () =>
+    buildHomepageRenderArtifact(payload, payloadBodyJson),
   );
   const renderBodyJson = withTraceSync(trace, 'homepage_write_stringify_artifact', () =>
     JSON.stringify(render),

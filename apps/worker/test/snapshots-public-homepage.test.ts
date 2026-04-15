@@ -84,6 +84,20 @@ function samplePayload(now = 1_728_000_000) {
   };
 }
 
+function hydrateStoredRenderArtifact(
+  artifact: ReturnType<typeof buildHomepageRenderArtifact>,
+) {
+  if ('snapshot' in artifact) {
+    return artifact;
+  }
+
+  const { snapshot_json: _ignoredSnapshotJson, ...rest } = artifact;
+  return {
+    ...rest,
+    snapshot: JSON.parse(artifact.snapshot_json),
+  };
+}
+
 describe('snapshots/public-homepage', () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -98,6 +112,7 @@ describe('snapshots/public-homepage', () => {
   it('reads fresh and bounded-stale homepage snapshots without live compute', async () => {
     const payload = samplePayload(190);
     const storedRender = buildHomepageRenderArtifact(payload);
+    const hydratedRender = hydrateStoredRenderArtifact(storedRender);
     const db = createFakeD1Database([
       {
         match: 'from public_snapshots',
@@ -118,7 +133,7 @@ describe('snapshots/public-homepage', () => {
       age: 10,
     });
     await expect(readHomepageSnapshotArtifact(db, 200)).resolves.toEqual({
-      data: storedRender,
+      data: hydratedRender,
       age: 10,
     });
     await expect(readStaleHomepageSnapshot(db, 200)).resolves.toEqual({
@@ -126,7 +141,7 @@ describe('snapshots/public-homepage', () => {
       age: 10,
     });
     await expect(readStaleHomepageSnapshotArtifact(db, 200)).resolves.toEqual({
-      data: storedRender,
+      data: hydratedRender,
       age: 10,
     });
   });
@@ -178,7 +193,7 @@ describe('snapshots/public-homepage', () => {
     };
 
     const artifact = buildHomepageRenderArtifact(payload);
-    const bootstrapped = artifact.snapshot;
+    const bootstrapped = hydrateStoredRenderArtifact(artifact).snapshot;
     expect(bootstrapped.bootstrap_mode).toBe('full');
     expect(bootstrapped.monitor_count_total).toBe(30);
     expect(bootstrapped.monitors).toHaveLength(30);

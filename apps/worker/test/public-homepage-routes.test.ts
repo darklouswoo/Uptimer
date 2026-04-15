@@ -174,7 +174,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };
@@ -202,7 +202,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };
@@ -258,7 +258,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };
@@ -289,7 +289,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };
@@ -330,7 +330,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };
@@ -463,7 +463,7 @@ describe('public homepage route', () => {
     const render = {
       generated_at: payload.generated_at,
       preload_html: '<div id="uptimer-preload">hello</div>',
-      snapshot: payload,
+      snapshot_json: JSON.stringify(payload),
       meta_title: 'Uptimer',
       meta_description: 'All Systems Operational',
     };

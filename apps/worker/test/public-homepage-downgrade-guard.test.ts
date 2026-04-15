@@ -70,7 +70,7 @@ function sampleRender(now = 190) {
   return {
     generated_at: snapshot.generated_at,
     preload_html: '<div id="uptimer-preload"></div>',
-    snapshot,
+    snapshot_json: JSON.stringify(snapshot),
     meta_title: snapshot.site_title,
     meta_description: snapshot.banner.title,
   };
