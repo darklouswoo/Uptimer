@@ -735,14 +735,14 @@ export async function writeHomepageSnapshot(
   now: number,
   payload: PublicHomepageResponse,
   trace?: Trace,
-  seedDataSnapshot = false,
+  _seedDataSnapshot = false,
 ): Promise<void> {
   const render = withTraceSync(trace, 'homepage_write_render', () =>
     buildHomepageRenderArtifact(payload),
   );
-  const payloadBodyJson = seedDataSnapshot
-    ? withTraceSync(trace, 'homepage_write_stringify_payload', () => JSON.stringify(payload))
-    : null;
+  const payloadBodyJson = withTraceSync(trace, 'homepage_write_stringify_payload', () =>
+    JSON.stringify(payload),
+  );
   const renderBodyJson = withTraceSync(trace, 'homepage_write_stringify_artifact', () =>
     JSON.stringify(render),
   );
@@ -751,29 +751,19 @@ export async function writeHomepageSnapshot(
     const statements = [
       homepageSnapshotUpsertStatement(
         db,
+        SNAPSHOT_KEY,
+        render.generated_at,
+        payloadBodyJson,
+        now,
+      ),
+      homepageSnapshotUpsertStatement(
+        db,
         SNAPSHOT_ARTIFACT_KEY,
         render.generated_at,
         renderBodyJson,
         now,
       ),
     ];
-
-    if (payloadBodyJson !== null) {
-      statements.unshift(
-        homepageSnapshotUpsertStatement(
-          db,
-          SNAPSHOT_KEY,
-          render.generated_at,
-          payloadBodyJson,
-          now,
-        ),
-      );
-    }
-
-    if (statements.length === 1) {
-      await statements[0]!.run();
-      return;
-    }
 
     await db.batch(statements);
   });
