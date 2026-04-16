@@ -1581,12 +1581,15 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
   baseSnapshot: PublicHomepageResponse | null;
   runtimeSnapshot: PublicMonitorRuntimeSnapshot | null;
   now: number;
+  trace?: Trace;
 }): PublicHomepageResponse | null {
   const { baseSnapshot, runtimeSnapshot, now } = opts;
   if (!baseSnapshot || !runtimeSnapshot || !canPatchHomepageFromRuntime(baseSnapshot)) {
+    opts.trace?.setLabel('runtime_snapshot_patch_skip', 'base_ineligible');
     return null;
   }
   if (Math.max(0, now - baseSnapshot.generated_at) > HOMEPAGE_FAST_PATCH_BASE_MAX_AGE_SECONDS) {
+    opts.trace?.setLabel('runtime_snapshot_patch_skip', 'base_stale');
     return null;
   }
   if (
@@ -1594,11 +1597,13 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
     runtimeSnapshot.generated_at > now ||
     runtimeSnapshot.day_start_at !== utcDayStart(now)
   ) {
+    opts.trace?.setLabel('runtime_snapshot_patch_skip', 'runtime_window');
     return null;
   }
 
   const monitorIds = baseSnapshot.monitors.map((monitor) => monitor.id);
   if (!snapshotHasMonitorIds(runtimeSnapshot, monitorIds)) {
+    opts.trace?.setLabel('runtime_snapshot_patch_skip', 'missing_monitor_ids');
     return null;
   }
 
@@ -1611,6 +1616,7 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
     return Math.min(acc, entry.created_at);
   }, Number.POSITIVE_INFINITY);
   if (!Number.isFinite(earliestCreatedAt)) {
+    opts.trace?.setLabel('runtime_snapshot_patch_skip', 'missing_created_at');
     return null;
   }
 
@@ -1631,6 +1637,7 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
   for (const baseMonitor of baseSnapshot.monitors) {
     const runtimeEntry = runtimeById.get(baseMonitor.id);
     if (!hasReusableRuntimeCreatedAt(runtimeEntry)) {
+      opts.trace?.setLabel('runtime_snapshot_patch_skip', 'monitor_runtime_missing');
       return null;
     }
 
@@ -1691,6 +1698,7 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
     patchedMonitors.push(monitor);
   }
 
+  opts.trace?.setLabel('runtime_snapshot_patch', '1');
   return {
     ...baseSnapshot,
     generated_at: now,
@@ -2097,6 +2105,7 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
       baseSnapshot,
       runtimeSnapshot,
       now: opts.now,
+      ...(opts.trace ? { trace: opts.trace } : {}),
     }),
   );
   if (runtimePatched) {
