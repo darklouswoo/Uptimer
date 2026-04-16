@@ -1409,6 +1409,139 @@ describe('computePublicHomepagePayload', () => {
     });
   });
 
+  it('uses runtime snapshot state for monitors without fresh runtime updates in the metadata patch path', async () => {
+    const dayStart = 1_728_000_000;
+    const baseNow = dayStart + 40;
+    const now = dayStart + 130;
+    const baseSnapshot = {
+      generated_at: baseNow,
+      bootstrap_mode: 'full' as const,
+      monitor_count_total: 1,
+      site_title: 'Status Hub',
+      site_description: 'Production services',
+      site_locale: 'en' as const,
+      site_timezone: 'UTC',
+      uptime_rating_level: 4 as const,
+      overall_status: 'down' as const,
+      banner: {
+        source: 'monitors' as const,
+        status: 'partial_outage' as const,
+        title: 'Partial Outage',
+      },
+      summary: {
+        up: 0,
+        down: 1,
+        maintenance: 0,
+        paused: 0,
+        unknown: 0,
+      },
+      monitors: [
+        {
+          id: 1,
+          name: 'API',
+          type: 'http' as const,
+          group_name: 'Core',
+          status: 'down' as const,
+          is_stale: false,
+          last_checked_at: baseNow - 30,
+          heartbeat_strip: {
+            checked_at: [baseNow - 30],
+            status_codes: 'd',
+            latency_ms: [null],
+          },
+          uptime_30d: { uptime_pct: 98 },
+          uptime_day_strip: {
+            day_start_at: [dayStart],
+            downtime_sec: [30],
+            unknown_sec: [0],
+            uptime_pct_milli: [95_000],
+          },
+        },
+      ],
+      active_incidents: [],
+      maintenance_windows: {
+        active: [],
+        upcoming: [],
+      },
+      resolved_incident_preview: null,
+      maintenance_history_preview: null,
+    };
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: 'has_resolved_incident_preview',
+        first: () => ({
+          site_title_value: 'Status Hub',
+          site_description_value: 'Production services',
+          site_locale_value: 'en',
+          site_timezone_value: 'UTC',
+          uptime_rating_level_value: '4',
+          monitor_count_total: 1,
+          max_updated_at: baseNow,
+          has_active_incidents: 0,
+          has_resolved_incident_preview: 0,
+          has_active_maintenance: 0,
+          has_upcoming_maintenance: 0,
+          has_maintenance_history_preview: 0,
+        }),
+      },
+      {
+        match: 'from public_snapshots',
+        first: () => ({
+          generated_at: now - 5,
+          body_json: JSON.stringify({
+            version: 1,
+            generated_at: now - 5,
+            day_start_at: dayStart,
+            monitors: [
+              {
+                monitor_id: 1,
+                created_at: dayStart - 86_400,
+                interval_sec: 60,
+                range_start_at: dayStart,
+                materialized_at: now - 5,
+                last_checked_at: now - 10,
+                last_status_code: 'u',
+                last_outage_open: false,
+                total_sec: 120,
+                downtime_sec: 0,
+                unknown_sec: 0,
+                uptime_sec: 120,
+                heartbeat_gap_sec: '',
+                heartbeat_latency_ms: [42],
+                heartbeat_status_codes: 'u',
+              },
+            ],
+          }),
+        }),
+      },
+    ];
+
+    const payload = await tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates({
+      db: createFakeD1Database(handlers),
+      now,
+      baseSnapshot,
+      baseSnapshotBodyJson: null,
+      updates: [],
+    });
+
+    expect(payload).not.toBeNull();
+    expect(payload?.generated_at).toBe(now);
+    expect(payload?.overall_status).toBe('up');
+    expect(payload?.monitors[0]?.status).toBe('up');
+    expect(payload?.monitors[0]?.is_stale).toBe(false);
+    expect(payload?.monitors[0]?.last_checked_at).toBe(now - 10);
+    expect(payload?.monitors[0]?.heartbeat_strip.checked_at).toEqual([now - 10]);
+    expect(payload?.monitors[0]?.heartbeat_strip.status_codes).toBe('u');
+    expect(payload?.summary).toEqual({
+      up: 1,
+      down: 0,
+      maintenance: 0,
+      paused: 0,
+      unknown: 0,
+    });
+  });
+
   it('falls back from the scheduled fast path when the latest resolved incident preview changes', async () => {
     const dayStart = 1_728_000_000;
     const baseNow = dayStart + 60;

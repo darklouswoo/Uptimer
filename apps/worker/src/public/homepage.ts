@@ -1736,41 +1736,30 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
         },
       };
     } else {
-      const segmentStart = Math.max(todayStartAt, baseSnapshot.generated_at, createdAt);
-      const segment = computePatchedHomepageSegmentTotals({
-        status: baseMonitor.status,
-        isStale: baseMonitor.is_stale,
-        lastCheckedAt: baseMonitor.last_checked_at,
-        intervalSec,
-        segmentStart,
-        segmentEnd: now,
-      });
-      const totalSec = Math.max(0, now - Math.max(todayStartAt, createdAt));
-      const nextDowntimeSec = currentDowntime + segment.downtimeSec;
-      const nextUnknownSec = currentUnknown + segment.unknownSec;
-      const nextUptimeSec = Math.max(0, totalSec - nextDowntimeSec - nextUnknownSec);
-      todayTotals = {
-        total_sec: totalSec,
-        downtime_sec: nextDowntimeSec,
-        unknown_sec: nextUnknownSec,
-        uptime_sec: nextUptimeSec,
-        uptime_pct: totalSec === 0 ? null : (nextUptimeSec / totalSec) * 100,
-      };
-
+      const heartbeats = runtimeEntryToHeartbeats(runtimeEntry);
+      todayTotals = materializeMonitorRuntimeTotals(runtimeEntry, now);
       const presentation = computeHomepageMonitorPresentation(
         {
           id: baseMonitor.id,
           interval_sec: intervalSec,
-          last_checked_at: baseMonitor.last_checked_at,
-          state_status: baseMonitor.status,
+          last_checked_at: runtimeEntry.last_checked_at,
+          state_status: fromRuntimeStatusCode(runtimeEntry.last_status_code),
         },
         now,
         noMaintenanceMonitorIds,
       );
       nextMonitor = {
         ...baseMonitor,
+        last_checked_at: runtimeEntry.last_checked_at,
         status: presentation.status,
         is_stale: presentation.is_stale,
+        heartbeat_strip: {
+          checked_at: heartbeats.map((heartbeat) => heartbeat.checked_at),
+          latency_ms: heartbeats.map((heartbeat) => heartbeat.latency_ms),
+          status_codes: heartbeats
+            .map((heartbeat) => toHeartbeatStatusCode(heartbeat.status))
+            .join(''),
+        },
         uptime_30d: null,
         uptime_day_strip: {
           day_start_at: [],
