@@ -534,24 +534,23 @@ describe('snapshots/public-homepage', () => {
     });
   });
 
-  it('uses the same-day homepage payload row as the refresh base without reading the artifact row', async () => {
+  it('uses the same-day homepage payload row as the refresh base from the batch snapshot read', async () => {
     const now = 1_728_000_500;
     const payload = samplePayload(now - 60);
-    const readKeys: string[] = [];
+    let readCount = 0;
     const db = createFakeD1Database([
       {
-        match: 'select generated_at, updated_at, body_json from public_snapshots where key = ?1',
-        first: (args) => {
-          const key = String(args[0]);
-          readKeys.push(key);
-          if (key === 'homepage') {
-            return {
+        match: 'select key, generated_at, updated_at, body_json from public_snapshots',
+        all: () => {
+          readCount += 1;
+          return [
+            {
+              key: 'homepage',
               generated_at: payload.generated_at,
               updated_at: payload.generated_at,
               body_json: JSON.stringify(payload),
-            };
-          }
-          throw new Error(`unexpected artifact read: ${key}`);
+            },
+          ];
         },
       },
     ]);
@@ -561,7 +560,7 @@ describe('snapshots/public-homepage', () => {
       snapshot: payload,
       seedDataSnapshot: false,
     });
-    expect(readKeys).toEqual(['homepage']);
+    expect(readCount).toBe(1);
   });
 
   it('keeps using the valid homepage row when an equal-age artifact row is corrupted', async () => {

@@ -29,18 +29,9 @@ const READ_REFRESH_SNAPSHOT_ROW_BY_KEY_SQL = `
   FROM public_snapshots
   WHERE key = ?1
 `;
-const READ_REFRESH_SNAPSHOT_METADATA_ROW_BY_KEY_SQL = `
-  SELECT generated_at, updated_at
-  FROM public_snapshots
-  WHERE key = ?1
-`;
 const readRefreshSnapshotMetadataStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowByKeyStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
-const readRefreshSnapshotMetadataRowByKeyStatementByDb = new WeakMap<
-  D1Database,
-  D1PreparedStatement
->();
 const normalizedHomepagePayloadCacheByDb = new WeakMap<
   D1Database,
   Map<SnapshotKey, NormalizedSnapshotRow>
@@ -503,25 +494,6 @@ async function readRefreshSnapshotRowByKey(
   }
 }
 
-async function readRefreshSnapshotMetadataRowByKey(
-  db: D1Database,
-  key: SnapshotKey,
-): Promise<SnapshotRefreshMetadataRow | null> {
-  try {
-    const cached = readRefreshSnapshotMetadataRowByKeyStatementByDb.get(db);
-    const statement = cached ?? db.prepare(READ_REFRESH_SNAPSHOT_METADATA_ROW_BY_KEY_SQL);
-    if (!cached) {
-      readRefreshSnapshotMetadataRowByKeyStatementByDb.set(db, statement);
-    }
-
-    const row = await statement.bind(key).first<Omit<SnapshotRefreshMetadataRow, 'key'>>();
-    return row ? { key, ...row } : null;
-  } catch (err) {
-    console.warn('homepage snapshot: refresh metadata row read failed', err);
-    return null;
-  }
-}
-
 function listSnapshotCandidatesFromRefreshRows(
   rows: readonly SnapshotRefreshMetadataRow[],
 ): SnapshotCandidate[] {
@@ -797,19 +769,10 @@ export async function readHomepageRefreshBaseSnapshot(
     return parsedRow;
   };
 
-  let homepageRow = await readRefreshSnapshotRowByKey(db, SNAPSHOT_KEY);
-  let artifactRow: SnapshotRefreshRow | null = null;
-
-  if (homepageRow === null) {
-    artifactRow = await readRefreshSnapshotRowByKey(db, SNAPSHOT_ARTIFACT_KEY);
-  }
-
-  if (homepageRow === null && artifactRow === null) {
-    const refreshRows = await readRefreshSnapshotRows(db);
-    const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
-    homepageRow = rowByKey.get(SNAPSHOT_KEY) ?? null;
-    artifactRow = rowByKey.get(SNAPSHOT_ARTIFACT_KEY) ?? null;
-  }
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const homepageRow = rowByKey.get(SNAPSHOT_KEY) ?? null;
+  const artifactRow = rowByKey.get(SNAPSHOT_ARTIFACT_KEY) ?? null;
 
   const homepageCandidate: SnapshotCandidate | null = homepageRow
     ? {
@@ -830,28 +793,10 @@ export async function readHomepageRefreshBaseSnapshot(
           }
         : null;
 
-      const resolvedArtifactMetadataCandidate =
-        artifactMetadataCandidate ??
-        (await (async (): Promise<SnapshotCandidate | null> => {
-          const artifactMetadata = await readRefreshSnapshotMetadataRowByKey(
-            db,
-            SNAPSHOT_ARTIFACT_KEY,
-          );
-          if (!artifactMetadata) {
-            return null;
-          }
-          const candidate: SnapshotCandidate = {
-            key: SNAPSHOT_ARTIFACT_KEY,
-            generatedAt: artifactMetadata.generated_at,
-            updatedAt: toSnapshotUpdatedAt(artifactMetadata),
-          };
-          return isFutureSnapshotCandidate(candidate, now) ? null : candidate;
-        })());
-
       if (
-        !resolvedArtifactMetadataCandidate ||
-        !isSameUtcDay(resolvedArtifactMetadataCandidate.generatedAt, now) ||
-        comparePayloadCandidates(resolvedArtifactMetadataCandidate, homepageCandidate) >= 0
+        !artifactMetadataCandidate ||
+        !isSameUtcDay(artifactMetadataCandidate.generatedAt, now) ||
+        comparePayloadCandidates(artifactMetadataCandidate, homepageCandidate) >= 0
       ) {
         return {
           generatedAt: homepageBase.generatedAt,
@@ -860,10 +805,6 @@ export async function readHomepageRefreshBaseSnapshot(
         };
       }
     }
-  }
-
-  if (artifactRow === null) {
-    artifactRow = await readRefreshSnapshotRowByKey(db, SNAPSHOT_ARTIFACT_KEY);
   }
 
   const artifactCandidate: SnapshotCandidate | null = artifactRow
