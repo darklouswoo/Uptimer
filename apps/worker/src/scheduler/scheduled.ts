@@ -984,9 +984,8 @@ export async function runPersistedMonitorBatch(opts: {
     }
   }
 
-  const runtimeUpdates = completed
-    .map(toMonitorRuntimeUpdate)
-    .sort((left, right) => left.monitor_id - right.monitor_id);
+  // Promise.allSettled preserves input order, so keep the existing monitor ordering here.
+  const runtimeUpdates = completed.map(toMonitorRuntimeUpdate);
 
   return {
     runtimeUpdates,
@@ -1162,8 +1161,6 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       persistDurMs = batch.persistDurMs;
       mergeBatchStats(aggregateStats, batch.stats);
     }
-
-    runtimeUpdates = runtimeUpdates.sort((left, right) => left.monitor_id - right.monitor_id);
 
     if (runtimeUpdates.length > 0) {
       const runtimeSnapshotStart = performance.now();

@@ -377,6 +377,18 @@ export const publicMonitorRuntimeSnapshotSchema = z.object({
 const readRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const upsertRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const runtimeSnapshotCacheByDb = new WeakMap<D1Database, RuntimeSnapshotCacheEntry>();
+const runtimeSnapshotMonitorIdsBySnapshot = new WeakMap<
+  PublicMonitorRuntimeSnapshot,
+  ReadonlySet<number>
+>();
+const runtimeSnapshotEntryMapBySnapshot = new WeakMap<
+  PublicMonitorRuntimeSnapshot,
+  ReadonlyMap<number, PublicMonitorRuntimeEntry>
+>();
+const runtimeEntryHeartbeatsByEntry = new WeakMap<
+  PublicMonitorRuntimeEntry,
+  MonitorRuntimeHeartbeat[]
+>();
 let runtimeSnapshotCacheGlobal: RuntimeSnapshotCacheGlobalEntry | null = null;
 
 type RuntimeSnapshotRow = {
@@ -537,6 +549,38 @@ function writeCachedRuntimeSnapshotGlobal(
   return snapshot;
 }
 
+function readSnapshotMonitorIds(
+  snapshot: PublicMonitorRuntimeSnapshot,
+): ReadonlySet<number> {
+  const cached = runtimeSnapshotMonitorIdsBySnapshot.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = new Set<number>();
+  for (const entry of snapshot.monitors) {
+    next.add(entry.monitor_id);
+  }
+  runtimeSnapshotMonitorIdsBySnapshot.set(snapshot, next);
+  return next;
+}
+
+function readSnapshotEntryMap(
+  snapshot: PublicMonitorRuntimeSnapshot,
+): ReadonlyMap<number, PublicMonitorRuntimeEntry> {
+  const cached = runtimeSnapshotEntryMapBySnapshot.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = new Map<number, PublicMonitorRuntimeEntry>();
+  for (const entry of snapshot.monitors) {
+    next.set(entry.monitor_id, entry);
+  }
+  runtimeSnapshotEntryMapBySnapshot.set(snapshot, next);
+  return next;
+}
+
 async function readStoredMonitorRuntimeSnapshot(
   db: D1Database,
 ): Promise<{ generatedAt: number; snapshot: PublicMonitorRuntimeSnapshot } | null> {
@@ -629,7 +673,11 @@ export function snapshotHasMonitorIds(
   monitorIds: number[],
 ): boolean {
   if (monitorIds.length === 0) return true;
-  const seen = new Set(snapshot.monitors.map((entry) => entry.monitor_id));
+  if (monitorIds.length > snapshot.monitors.length) {
+    return false;
+  }
+
+  const seen = readSnapshotMonitorIds(snapshot);
   for (const monitorId of monitorIds) {
     if (!seen.has(monitorId)) {
       return false;
@@ -641,7 +689,7 @@ export function snapshotHasMonitorIds(
 export function toMonitorRuntimeEntryMap(
   snapshot: PublicMonitorRuntimeSnapshot,
 ): ReadonlyMap<number, PublicMonitorRuntimeEntry> {
-  return new Map(snapshot.monitors.map((entry) => [entry.monitor_id, entry]));
+  return readSnapshotEntryMap(snapshot);
 }
 
 function computeSegmentTotals(opts: {
@@ -744,10 +792,9 @@ export function applyMonitorRuntimeUpdates(
   updates: MonitorRuntimeUpdate[],
 ): PublicMonitorRuntimeSnapshot {
   const dayStart = utcDayStart(now);
-  const nextById = new Map<number, PublicMonitorRuntimeEntry>();
-  for (const entry of snapshot.monitors) {
-    nextById.set(entry.monitor_id, cloneRuntimeEntry(entry));
-  }
+  const sourceById = readSnapshotEntryMap(snapshot);
+  const nextById = new Map<number, PublicMonitorRuntimeEntry>(sourceById);
+  let hasInsertedMonitor = false;
 
   for (const update of updates) {
     if (!Number.isInteger(update.monitor_id) || update.monitor_id <= 0) continue;
@@ -758,6 +805,7 @@ export function applyMonitorRuntimeUpdates(
     const existing = nextById.get(update.monitor_id);
     if (!existing) {
       nextById.set(update.monitor_id, createRuntimeEntryForUpdate(update, dayStart));
+      hasInsertedMonitor = true;
       continue;
     }
     if (
@@ -768,67 +816,76 @@ export function applyMonitorRuntimeUpdates(
       continue;
     }
 
-    if (existing.created_at === null) {
-      existing.created_at = clampNonNegativeInteger(update.created_at);
+    const sourceEntry = sourceById.get(update.monitor_id);
+    const nextEntry =
+      sourceEntry && existing === sourceEntry ? cloneRuntimeEntry(existing) : existing;
+    if (nextEntry !== existing) {
+      nextById.set(update.monitor_id, nextEntry);
     }
-    existing.interval_sec = Math.max(1, clampNonNegativeInteger(update.interval_sec));
-    const rangeStartAt = existing.range_start_at;
+
+    if (nextEntry.created_at === null) {
+      nextEntry.created_at = clampNonNegativeInteger(update.created_at);
+    }
+    nextEntry.interval_sec = Math.max(1, clampNonNegativeInteger(update.interval_sec));
+    const rangeStartAt = nextEntry.range_start_at;
     const segmentStart =
-      rangeStartAt === null ? update.checked_at : Math.max(rangeStartAt, existing.materialized_at);
+      rangeStartAt === null ? update.checked_at : Math.max(rangeStartAt, nextEntry.materialized_at);
     const segment = computeSegmentTotals({
       segmentStart,
       segmentEnd: update.checked_at,
-      lastCheckedAt: existing.last_checked_at,
-      lastStatusCode: existing.last_status_code,
-      lastOutageOpen: existing.last_outage_open,
-      intervalSec: existing.interval_sec,
+      lastCheckedAt: nextEntry.last_checked_at,
+      lastStatusCode: nextEntry.last_status_code,
+      lastOutageOpen: nextEntry.last_outage_open,
+      intervalSec: nextEntry.interval_sec,
     });
 
-    existing.total_sec += segment.totalSec;
-    existing.downtime_sec += segment.downtimeSec;
-    existing.unknown_sec += segment.unknownSec;
-    existing.uptime_sec += segment.uptimeSec;
+    nextEntry.total_sec += segment.totalSec;
+    nextEntry.downtime_sec += segment.downtimeSec;
+    nextEntry.unknown_sec += segment.unknownSec;
+    nextEntry.uptime_sec += segment.uptimeSec;
 
-    if (existing.range_start_at === null) {
+    if (nextEntry.range_start_at === null) {
       const createdToday =
         Number.isFinite(update.created_at) &&
         update.created_at >= dayStart &&
         update.created_at <= update.checked_at;
-      existing.range_start_at = createdToday ? update.checked_at : dayStart;
+      nextEntry.range_start_at = createdToday ? update.checked_at : dayStart;
     }
-    existing.materialized_at = update.checked_at;
-    const previousLastCheckedAt = existing.last_checked_at;
-    existing.last_checked_at = update.checked_at;
-    existing.last_status_code = toRuntimeCurrentStatusCode(update);
-    existing.last_outage_open = update.next_status === 'down';
+    nextEntry.materialized_at = update.checked_at;
+    const previousLastCheckedAt = nextEntry.last_checked_at;
+    nextEntry.last_checked_at = update.checked_at;
+    nextEntry.last_status_code = toRuntimeCurrentStatusCode(update);
+    nextEntry.last_outage_open = update.next_status === 'down';
 
-    existing.heartbeat_latency_ms.unshift(normalizeRuntimeUpdateLatencyMs(update.latency_ms));
-    existing.heartbeat_status_codes = `${toRuntimeStatusCode(update.check_status)}${existing.heartbeat_status_codes}`;
-    const gaps = parseHeartbeatGapSec(existing.heartbeat_gap_sec);
+    nextEntry.heartbeat_latency_ms.unshift(normalizeRuntimeUpdateLatencyMs(update.latency_ms));
+    nextEntry.heartbeat_status_codes = `${toRuntimeStatusCode(update.check_status)}${nextEntry.heartbeat_status_codes}`;
+    const gaps = parseHeartbeatGapSec(nextEntry.heartbeat_gap_sec);
     if (typeof previousLastCheckedAt === 'number' && Number.isInteger(previousLastCheckedAt)) {
       gaps.unshift(Math.max(0, update.checked_at - previousLastCheckedAt));
     }
 
-    if (existing.heartbeat_latency_ms.length > MONITOR_RUNTIME_HEARTBEAT_POINTS) {
-      existing.heartbeat_latency_ms.length = MONITOR_RUNTIME_HEARTBEAT_POINTS;
+    if (nextEntry.heartbeat_latency_ms.length > MONITOR_RUNTIME_HEARTBEAT_POINTS) {
+      nextEntry.heartbeat_latency_ms.length = MONITOR_RUNTIME_HEARTBEAT_POINTS;
     }
-    if (existing.heartbeat_status_codes.length > MONITOR_RUNTIME_HEARTBEAT_POINTS) {
-      existing.heartbeat_status_codes = existing.heartbeat_status_codes.slice(
+    if (nextEntry.heartbeat_status_codes.length > MONITOR_RUNTIME_HEARTBEAT_POINTS) {
+      nextEntry.heartbeat_status_codes = nextEntry.heartbeat_status_codes.slice(
         0,
         MONITOR_RUNTIME_HEARTBEAT_POINTS,
       );
     }
-    if (gaps.length > Math.max(0, existing.heartbeat_latency_ms.length - 1)) {
-      gaps.length = Math.max(0, existing.heartbeat_latency_ms.length - 1);
+    if (gaps.length > Math.max(0, nextEntry.heartbeat_latency_ms.length - 1)) {
+      gaps.length = Math.max(0, nextEntry.heartbeat_latency_ms.length - 1);
     }
-    existing.heartbeat_gap_sec = encodeHeartbeatGapSec(gaps);
+    nextEntry.heartbeat_gap_sec = encodeHeartbeatGapSec(gaps);
   }
 
   return {
     version: MONITOR_RUNTIME_SNAPSHOT_VERSION,
     generated_at: now,
     day_start_at: dayStart,
-    monitors: [...nextById.values()].sort((a, b) => a.monitor_id - b.monitor_id),
+    monitors: hasInsertedMonitor
+      ? [...nextById.values()].sort((a, b) => a.monitor_id - b.monitor_id)
+      : [...nextById.values()],
   };
 }
 
@@ -871,9 +928,15 @@ export function materializeMonitorRuntimeTotals(
 export function runtimeEntryToHeartbeats(
   entry: PublicMonitorRuntimeEntry,
 ): MonitorRuntimeHeartbeat[] {
+  const cached = runtimeEntryHeartbeatsByEntry.get(entry);
+  if (cached) {
+    return cached;
+  }
+
   const heartbeats: MonitorRuntimeHeartbeat[] = [];
   const count = Math.min(entry.heartbeat_latency_ms.length, entry.heartbeat_status_codes.length);
   if (count === 0 || entry.last_checked_at === null) {
+    runtimeEntryHeartbeatsByEntry.set(entry, heartbeats);
     return heartbeats;
   }
 
@@ -892,6 +955,7 @@ export function runtimeEntryToHeartbeats(
       checkedAt = Math.max(0, checkedAt - gap);
     }
   }
+  runtimeEntryHeartbeatsByEntry.set(entry, heartbeats);
   return heartbeats;
 }
 
@@ -916,7 +980,7 @@ export async function refreshPublicMonitorRuntimeSnapshot(opts: {
   }
 
   const snapshot = stored.snapshot;
-  const snapshotMonitorIds = new Set(snapshot.monitors.map((entry) => entry.monitor_id));
+  const snapshotMonitorIds = readSnapshotMonitorIds(snapshot);
   const missingHistoricalEntry = opts.updates.some(
     (update) =>
       !snapshotMonitorIds.has(update.monitor_id) &&

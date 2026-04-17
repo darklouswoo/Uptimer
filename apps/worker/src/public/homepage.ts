@@ -119,6 +119,11 @@ type HomepageStatementCache = Partial<{
 }>;
 
 const homepageStatementCacheByDb = new WeakMap<D1Database, HomepageStatementCache>();
+const homepageSnapshotMonitorIdsCache = new WeakMap<PublicHomepageResponse, number[]>();
+const homepageSnapshotMonitorByIdCache = new WeakMap<
+  PublicHomepageResponse,
+  ReadonlyMap<number, HomepageMonitorCard>
+>();
 
 function getHomepageStatementCache(db: D1Database): HomepageStatementCache {
   const cached = homepageStatementCacheByDb.get(db);
@@ -167,6 +172,33 @@ function safeParseJsonArray<T>(text: string | null): T[] {
   } catch {
     return [];
   }
+}
+
+function getHomepageSnapshotMonitorIds(snapshot: PublicHomepageResponse): number[] {
+  const cached = homepageSnapshotMonitorIdsCache.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = snapshot.monitors.map((monitor) => monitor.id);
+  homepageSnapshotMonitorIdsCache.set(snapshot, next);
+  return next;
+}
+
+function getHomepageSnapshotMonitorById(
+  snapshot: PublicHomepageResponse,
+): ReadonlyMap<number, HomepageMonitorCard> {
+  const cached = homepageSnapshotMonitorByIdCache.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = new Map<number, HomepageMonitorCard>();
+  for (const monitor of snapshot.monitors) {
+    next.set(monitor.id, monitor);
+  }
+  homepageSnapshotMonitorByIdCache.set(snapshot, next);
+  return next;
 }
 
 export function parseHomepageSnapshotBodyJson(
@@ -565,7 +597,7 @@ function canReuseBaseSnapshotMonitorMetadata(opts: {
     return false;
   }
 
-  const monitorIds = baseSnapshot.monitors.map((monitor) => monitor.id);
+  const monitorIds = getHomepageSnapshotMonitorIds(baseSnapshot);
   if (!snapshotHasMonitorIds(runtimeSnapshot, monitorIds)) {
     return false;
   }
@@ -589,7 +621,7 @@ function canTrustBaseSnapshotMonitorMetadata(opts: {
     baseSnapshot.monitor_count_total !== baseSnapshot.monitors.length ||
     !snapshotHasMonitorIds(
       runtimeSnapshot,
-      baseSnapshot.monitors.map((monitor) => monitor.id),
+      getHomepageSnapshotMonitorIds(baseSnapshot),
     )
   ) {
     return false;
@@ -856,9 +888,7 @@ async function buildHomepageMonitorCardsFromRows(
   // This avoids missing uptime strips / 30d uptime immediately after a fresh deployment.
   const needsToday = rangeEnd > rangeEndFullDays;
   const monitors = rows.map((row) => toHomepageMonitorCard(row, now, maintenanceMonitorIds));
-  const baseMonitorsById = baseSnapshot
-    ? new Map(baseSnapshot.monitors.map((monitor) => [monitor.id, monitor]))
-    : null;
+  const baseMonitorsById = baseSnapshot ? getHomepageSnapshotMonitorById(baseSnapshot) : null;
   const resolvedRuntimeSnapshot =
     runtimeSnapshot !== undefined
       ? runtimeSnapshot
@@ -1589,7 +1619,7 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
     return null;
   }
 
-  const monitorIds = baseSnapshot.monitors.map((monitor) => monitor.id);
+  const monitorIds = getHomepageSnapshotMonitorIds(baseSnapshot);
   const monitorIdSet = new Set(monitorIds);
   if (!snapshotHasMonitorIds(runtimeSnapshot, monitorIds)) {
     opts.trace?.setLabel('runtime_snapshot_patch_skip', 'missing_monitor_ids');
@@ -1741,7 +1771,10 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
         return null;
       }
 
-      const heartbeats = runtimeEntryToHeartbeats(runtimeEntry);
+      const heartbeats =
+        baseMonitor.last_checked_at === runtimeEntry.last_checked_at
+          ? null
+          : runtimeEntryToHeartbeats(runtimeEntry);
       todayTotals = materializeMonitorRuntimeTotals(runtimeEntry, now);
       const presentation = computeHomepageMonitorPresentation(
         {
@@ -1759,11 +1792,17 @@ function tryPatchPublicHomepagePayloadFromRuntimeSnapshot(opts: {
         status: presentation.status,
         is_stale: presentation.is_stale,
         heartbeat_strip: {
-          checked_at: heartbeats.map((heartbeat) => heartbeat.checked_at),
-          latency_ms: heartbeats.map((heartbeat) => heartbeat.latency_ms),
+          checked_at: heartbeats
+            ? heartbeats.map((heartbeat) => heartbeat.checked_at)
+            : baseMonitor.heartbeat_strip.checked_at,
+          latency_ms: heartbeats
+            ? heartbeats.map((heartbeat) => heartbeat.latency_ms)
+            : baseMonitor.heartbeat_strip.latency_ms,
           status_codes: heartbeats
-            .map((heartbeat) => toHeartbeatStatusCode(heartbeat.status))
-            .join(''),
+            ? heartbeats
+                .map((heartbeat) => toHeartbeatStatusCode(heartbeat.status))
+                .join('')
+            : baseMonitor.heartbeat_strip.status_codes,
         },
         uptime_30d: null,
         uptime_day_strip: {
