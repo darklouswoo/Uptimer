@@ -8,6 +8,7 @@ import {
   type Interval,
 } from '../analytics/uptime';
 import type { Env } from '../env';
+import { refreshPublicAnalyticsOverviewSnapshotIfNeeded } from '../public/analytics-overview';
 import { acquireLease } from './lock';
 
 type MonitorRow = {
@@ -350,6 +351,13 @@ export async function runDailyRollup(
   if (statements.length > 0) {
     await env.DB.batch(statements);
   }
+
+  await refreshPublicAnalyticsOverviewSnapshotIfNeeded({
+    db: env.DB,
+    now,
+    fullDayEndAt: targetDayEnd,
+    force: true,
+  });
 
   console.log(
     `daily-rollup: processed ${processed}/${monitors.length} monitors for day_start_at=${targetDayStart}`,

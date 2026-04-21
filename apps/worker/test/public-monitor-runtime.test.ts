@@ -8,6 +8,7 @@ import {
   parseMonitorRuntimeUpdate,
   parseMonitorRuntimeUpdates,
   readPublicMonitorRuntimeSnapshot,
+  readPublicMonitorRuntimeTotalsSnapshot,
   runtimeEntryToHeartbeats,
   writePublicMonitorRuntimeSnapshot,
   type PublicMonitorRuntimeSnapshot,
@@ -370,14 +371,19 @@ describe('public/monitor-runtime', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          const [key, generatedAt, bodyJson, updatedAt] = args as [string, number, string, number];
-          const existing = rows.get(key);
-          if (!existing || generatedAt >= existing.generated_at) {
-            rows.set(key, {
-              generated_at: generatedAt,
-              body_json: bodyJson,
-              updated_at: updatedAt,
-            });
+          const tuples = [
+            args.slice(0, 4) as [string, number, string, number],
+            args.slice(4, 8) as [string, number, string, number],
+          ];
+          for (const [key, generatedAt, bodyJson, updatedAt] of tuples) {
+            const existing = rows.get(key);
+            if (!existing || generatedAt >= existing.generated_at) {
+              rows.set(key, {
+                generated_at: generatedAt,
+                body_json: bodyJson,
+                updated_at: updatedAt,
+              });
+            }
           }
           return { meta: { changes: 1 } };
         },
@@ -404,6 +410,66 @@ describe('public/monitor-runtime', () => {
       generated_at: 120,
       body_json: JSON.stringify(newer),
       updated_at: 140,
+    });
+    expect(rows.get('monitor-runtime:totals')).toEqual({
+      generated_at: 120,
+      body_json: JSON.stringify({
+        version: 1,
+        generated_at: 120,
+        day_start_at: 0,
+        monitors: [],
+      }),
+      updated_at: 140,
+    });
+  });
+
+  it('prefers the compact totals snapshot key on read', async () => {
+    const db = createFakeD1Database([
+      {
+        match: 'from public_snapshots',
+        first: (args) => {
+          const [key] = args as [string];
+          if (key !== 'monitor-runtime:totals') {
+            return null;
+          }
+
+          return {
+            generated_at: 120,
+            updated_at: 120,
+            body_json: JSON.stringify({
+              version: 1,
+              generated_at: 120,
+              day_start_at: 0,
+              monitors: [
+                {
+                  monitor_id: 1,
+                  interval_sec: 60,
+                  range_start_at: 0,
+                  materialized_at: 120,
+                  last_checked_at: 120,
+                  last_status_code: 'u',
+                  last_outage_open: false,
+                  total_sec: 120,
+                  downtime_sec: 0,
+                  unknown_sec: 0,
+                  uptime_sec: 120,
+                },
+              ],
+            }),
+          };
+        },
+      },
+    ]);
+
+    const snapshot = await readPublicMonitorRuntimeTotalsSnapshot(db, 120);
+    expect(snapshot).toMatchObject({
+      monitors: [
+        {
+          monitor_id: 1,
+          total_sec: 120,
+          uptime_sec: 120,
+        },
+      ],
     });
   });
 });

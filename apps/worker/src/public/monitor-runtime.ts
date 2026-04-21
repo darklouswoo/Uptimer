@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const MONITOR_RUNTIME_SNAPSHOT_KEY = 'monitor-runtime';
+export const MONITOR_RUNTIME_TOTALS_SNAPSHOT_KEY = 'monitor-runtime:totals';
 export const MONITOR_RUNTIME_SNAPSHOT_VERSION = 1;
 export const MONITOR_RUNTIME_MAX_AGE_SECONDS = 3 * 60;
 export const MONITOR_RUNTIME_HEARTBEAT_POINTS = 60;
@@ -10,9 +11,11 @@ const READ_RUNTIME_SNAPSHOT_SQL = `
   FROM public_snapshots
   WHERE key = ?1
 `;
-const UPSERT_RUNTIME_SNAPSHOT_SQL = `
+const UPSERT_RUNTIME_SNAPSHOT_ROWS_SQL = `
   INSERT INTO public_snapshots (key, generated_at, body_json, updated_at)
-  VALUES (?1, ?2, ?3, ?4)
+  VALUES
+    (?1, ?2, ?3, ?4),
+    (?5, ?6, ?7, ?8)
   ON CONFLICT(key) DO UPDATE SET
     generated_at = excluded.generated_at,
     body_json = excluded.body_json,
@@ -486,7 +489,7 @@ export const publicMonitorRuntimeTotalsSnapshotSchema = z.custom<PublicMonitorRu
 );
 
 const readRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
-const upsertRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
+const upsertRuntimeSnapshotRowsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const runtimeSnapshotCacheByDb = new WeakMap<D1Database, RuntimeSnapshotCacheEntry>();
 const runtimeTotalsSnapshotCacheByDb = new WeakMap<D1Database, RuntimeTotalsSnapshotCacheEntry>();
 const runtimeSnapshotMonitorIdsBySnapshot = new WeakMap<
@@ -598,19 +601,28 @@ function readRuntimeSnapshotStatement(db: D1Database): D1PreparedStatement {
   return statement;
 }
 
-function upsertRuntimeSnapshotStatement(
+function upsertRuntimeSnapshotRowsStatement(
   db: D1Database,
-  generatedAt: number,
-  bodyJson: string,
+  snapshot: PublicMonitorRuntimeSnapshot,
+  totalsSnapshot: PublicMonitorRuntimeTotalsSnapshot,
   now: number,
 ): D1PreparedStatement {
-  const cached = upsertRuntimeSnapshotStatementByDb.get(db);
-  const statement = cached ?? db.prepare(UPSERT_RUNTIME_SNAPSHOT_SQL);
+  const cached = upsertRuntimeSnapshotRowsStatementByDb.get(db);
+  const statement = cached ?? db.prepare(UPSERT_RUNTIME_SNAPSHOT_ROWS_SQL);
   if (!cached) {
-    upsertRuntimeSnapshotStatementByDb.set(db, statement);
+    upsertRuntimeSnapshotRowsStatementByDb.set(db, statement);
   }
 
-  return statement.bind(MONITOR_RUNTIME_SNAPSHOT_KEY, generatedAt, bodyJson, now);
+  return statement.bind(
+    MONITOR_RUNTIME_SNAPSHOT_KEY,
+    snapshot.generated_at,
+    JSON.stringify(snapshot),
+    now,
+    MONITOR_RUNTIME_TOTALS_SNAPSHOT_KEY,
+    totalsSnapshot.generated_at,
+    JSON.stringify(totalsSnapshot),
+    now,
+  );
 }
 
 function toSnapshotUpdatedAt(row: Pick<RuntimeSnapshotRow, 'generated_at' | 'updated_at'>): number {
@@ -865,6 +877,73 @@ async function readStoredMonitorRuntimeTotalsSnapshot(
 ): Promise<{ generatedAt: number; snapshot: PublicMonitorRuntimeTotalsSnapshot } | null> {
   try {
     const row = await readRuntimeSnapshotStatement(db)
+      .bind(MONITOR_RUNTIME_TOTALS_SNAPSHOT_KEY)
+      .first<RuntimeSnapshotRow>();
+    if (!row?.body_json) {
+      return await readStoredMonitorRuntimeTotalsSnapshotFromFullSnapshot(db);
+    }
+
+    const updatedAt = toSnapshotUpdatedAt(row);
+    const cachedSnapshot = readCachedRuntimeTotalsSnapshot(db, row.generated_at, updatedAt);
+    if (cachedSnapshot) {
+      return {
+        generatedAt: row.generated_at,
+        snapshot: cachedSnapshot,
+      };
+    }
+
+    const globalCachedSnapshot = readCachedRuntimeTotalsSnapshotGlobal(
+      row.generated_at,
+      updatedAt,
+      row.body_json,
+    );
+    if (globalCachedSnapshot) {
+      return {
+        generatedAt: row.generated_at,
+        snapshot: writeCachedRuntimeTotalsSnapshot(
+          db,
+          row.generated_at,
+          updatedAt,
+          globalCachedSnapshot,
+        ),
+      };
+    }
+
+    const parsedJson = JSON.parse(row.body_json) as unknown;
+    const parsed = publicMonitorRuntimeTotalsSnapshotSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      console.warn('monitor runtime totals: invalid snapshot payload', parsed.error.message);
+      return await readStoredMonitorRuntimeTotalsSnapshotFromFullSnapshot(db);
+    }
+
+    return {
+      generatedAt: row.generated_at,
+      snapshot: writeCachedRuntimeTotalsSnapshot(
+        db,
+        row.generated_at,
+        updatedAt,
+        writeCachedRuntimeTotalsSnapshotGlobal(
+          row.generated_at,
+          updatedAt,
+          row.body_json,
+          parsed.data,
+        ),
+      ),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('No fake D1 first() handler matched SQL:')) {
+      return await readStoredMonitorRuntimeTotalsSnapshotFromFullSnapshot(db);
+    }
+    console.warn('monitor runtime totals: read failed', err);
+    return await readStoredMonitorRuntimeTotalsSnapshotFromFullSnapshot(db);
+  }
+}
+
+async function readStoredMonitorRuntimeTotalsSnapshotFromFullSnapshot(
+  db: D1Database,
+): Promise<{ generatedAt: number; snapshot: PublicMonitorRuntimeTotalsSnapshot } | null> {
+  try {
+    const row = await readRuntimeSnapshotStatement(db)
       .bind(MONITOR_RUNTIME_SNAPSHOT_KEY)
       .first<RuntimeSnapshotRow>();
     if (!row?.body_json) return null;
@@ -898,7 +977,7 @@ async function readStoredMonitorRuntimeTotalsSnapshot(
     const parsedJson = JSON.parse(row.body_json) as unknown;
     const parsed = publicMonitorRuntimeTotalsSnapshotSchema.safeParse(parsedJson);
     if (!parsed.success) {
-      console.warn('monitor runtime totals: invalid snapshot payload', parsed.error.message);
+      console.warn('monitor runtime totals: invalid full snapshot payload', parsed.error.message);
       return null;
     }
 
@@ -920,7 +999,7 @@ async function readStoredMonitorRuntimeTotalsSnapshot(
     if (err instanceof Error && err.message.startsWith('No fake D1 first() handler matched SQL:')) {
       return null;
     }
-    console.warn('monitor runtime totals: read failed', err);
+    console.warn('monitor runtime totals: fallback read failed', err);
     return null;
   }
 }
@@ -972,10 +1051,50 @@ export async function writePublicMonitorRuntimeSnapshot(
   snapshot: PublicMonitorRuntimeSnapshot,
   now: number,
 ): Promise<void> {
+  const totalsSnapshot = {
+    version: snapshot.version,
+    generated_at: snapshot.generated_at,
+    day_start_at: snapshot.day_start_at,
+    monitors: snapshot.monitors.map(
+      ({
+        monitor_id,
+        interval_sec,
+        range_start_at,
+        materialized_at,
+        last_checked_at,
+        last_status_code,
+        last_outage_open,
+        total_sec,
+        downtime_sec,
+        unknown_sec,
+        uptime_sec,
+      }) => ({
+        monitor_id,
+        interval_sec,
+        range_start_at,
+        materialized_at,
+        last_checked_at,
+        last_status_code,
+        last_outage_open,
+        total_sec,
+        downtime_sec,
+        unknown_sec,
+        uptime_sec,
+      }),
+    ),
+  } satisfies PublicMonitorRuntimeTotalsSnapshot;
   const bodyJson = JSON.stringify(snapshot);
+  const totalsBodyJson = JSON.stringify(totalsSnapshot);
   writeCachedRuntimeSnapshot(db, snapshot.generated_at, now, snapshot);
   writeCachedRuntimeSnapshotGlobal(snapshot.generated_at, now, bodyJson, snapshot);
-  await upsertRuntimeSnapshotStatement(db, snapshot.generated_at, bodyJson, now).run();
+  writeCachedRuntimeTotalsSnapshot(db, totalsSnapshot.generated_at, now, totalsSnapshot);
+  writeCachedRuntimeTotalsSnapshotGlobal(
+    totalsSnapshot.generated_at,
+    now,
+    totalsBodyJson,
+    totalsSnapshot,
+  );
+  await upsertRuntimeSnapshotRowsStatement(db, snapshot, totalsSnapshot, now).run();
 }
 
 export function snapshotHasMonitorIds(

@@ -30,14 +30,15 @@ async function requestPublicUi(path: string, handlers: FakeD1QueryHandler[]) {
     DB: createFakeD1Database(handlers),
     ADMIN_TOKEN: 'test-admin-token',
   } as unknown as Env;
+  const waitUntil = vi.fn();
 
   const res = await publicUiRoutes.fetch(
     new Request(`https://status.example.com${path}`),
     env,
-    { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    { waitUntil } as unknown as ExecutionContext,
   );
   const body = (await res.json()) as Record<string, unknown>;
-  return { res, body };
+  return { res, body, waitUntil };
 }
 
 describe('public ui routes', () => {
@@ -122,49 +123,76 @@ describe('public ui routes', () => {
     const handlers: FakeD1QueryHandler[] = [
       {
         match: (sql) =>
-          sql.includes('left join monitor_daily_rollups') && sql.includes('group by m.id, m.name, m.type'),
+          sql.includes('select m.id, m.name, m.type, m.created_at') &&
+          sql.includes('from monitors m') &&
+          sql.includes('where m.is_active = 1'),
         all: () => [
           {
             id: 21,
             name: 'Core API',
             type: 'http',
-            rollup_total_sec: 0,
-            rollup_downtime_sec: 0,
-            rollup_unknown_sec: 0,
-            rollup_uptime_sec: 0,
+            created_at: dayStart - 10 * 86_400,
           },
         ],
       },
       {
         match: (sql) => sql.includes('from public_snapshots') && sql.includes("where key = ?1"),
-        first: () => ({
-          generated_at: rangeEnd,
-          updated_at: rangeEnd,
-          body_json: JSON.stringify({
-            version: 1,
-            generated_at: rangeEnd,
-            day_start_at: dayStart,
-            monitors: [
-              {
-                monitor_id: 21,
-                created_at: dayStart - 10 * 86_400,
-                interval_sec: 60,
-                range_start_at: dayStart,
-                materialized_at: rangeEnd,
-                last_checked_at: rangeEnd,
-                last_status_code: 'u',
-                last_outage_open: false,
-                total_sec: 3_600,
-                downtime_sec: 300,
-                unknown_sec: 0,
-                uptime_sec: 3_300,
-                heartbeat_gap_sec: '',
-                heartbeat_latency_ms: [120],
-                heartbeat_status_codes: 'u',
-              },
-            ],
-          }),
-        }),
+        first: (args) => {
+          const [key] = args as [string];
+          if (key === 'analytics-overview') {
+            return {
+              generated_at: rangeEnd,
+              updated_at: rangeEnd,
+              body_json: JSON.stringify({
+                version: 1,
+                generated_at: rangeEnd,
+                full_day_end_at: dayStart,
+                monitors: [
+                  {
+                    monitor_id: 21,
+                    total_sec_30d: 0,
+                    downtime_sec_30d: 0,
+                    unknown_sec_30d: 0,
+                    uptime_sec_30d: 0,
+                    total_sec_90d: 0,
+                    downtime_sec_90d: 0,
+                    unknown_sec_90d: 0,
+                    uptime_sec_90d: 0,
+                  },
+                ],
+              }),
+            };
+          }
+
+          if (key === 'monitor-runtime:totals') {
+            return {
+              generated_at: rangeEnd,
+              updated_at: rangeEnd,
+              body_json: JSON.stringify({
+                version: 1,
+                generated_at: rangeEnd,
+                day_start_at: dayStart,
+                monitors: [
+                  {
+                    monitor_id: 21,
+                    interval_sec: 60,
+                    range_start_at: dayStart,
+                    materialized_at: rangeEnd,
+                    last_checked_at: rangeEnd,
+                    last_status_code: 'u',
+                    last_outage_open: false,
+                    total_sec: 3_600,
+                    downtime_sec: 300,
+                    unknown_sec: 0,
+                    uptime_sec: 3_300,
+                  },
+                ],
+              }),
+            };
+          }
+
+          return null;
+        },
       },
     ];
 
@@ -182,6 +210,156 @@ describe('public ui routes', () => {
           id: 21,
           total_sec: 3_600,
           downtime_sec: 300,
+        },
+      ],
+    });
+  });
+
+  it('falls back to the live route and queues an overview refresh when the historical snapshot is missing', async () => {
+    const dayStart = 1_728_000_000;
+    const rangeEnd = dayStart + 3_600;
+
+    vi.spyOn(Date, 'now').mockReturnValue(rangeEnd * 1000 + 10_000);
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: (sql) =>
+          sql.includes('select m.id, m.name, m.type, m.created_at') &&
+          sql.includes('from monitors m') &&
+          sql.includes('where m.is_active = 1'),
+        all: () => [
+          {
+            id: 21,
+            name: 'Core API',
+            type: 'http',
+            created_at: dayStart - 10 * 86_400,
+          },
+        ],
+      },
+      {
+        match: (sql) => sql.includes('from public_snapshots') && sql.includes("where key = ?1"),
+        first: (args) => {
+          const [key] = args as [string];
+          if (key === 'analytics-overview') {
+            return null;
+          }
+          if (key === 'monitor-runtime:totals') {
+            return {
+              generated_at: rangeEnd,
+              updated_at: rangeEnd,
+              body_json: JSON.stringify({
+                version: 1,
+                generated_at: rangeEnd,
+                day_start_at: dayStart,
+                monitors: [
+                  {
+                    monitor_id: 21,
+                    interval_sec: 60,
+                    range_start_at: dayStart,
+                    materialized_at: rangeEnd,
+                    last_checked_at: rangeEnd,
+                    last_status_code: 'u',
+                    last_outage_open: false,
+                    total_sec: 3_600,
+                    downtime_sec: 300,
+                    unknown_sec: 0,
+                    uptime_sec: 3_300,
+                  },
+                ],
+              }),
+            };
+          }
+          return null;
+        },
+      },
+      {
+        match: (sql) =>
+          sql.includes('select m.id, m.name, m.type, m.interval_sec, m.created_at, s.last_checked_at') &&
+          sql.includes('left join monitor_state'),
+        all: () => [
+          {
+            id: 21,
+            name: 'Core API',
+            type: 'http',
+            interval_sec: 60,
+            created_at: dayStart - 10 * 86_400,
+            last_checked_at: rangeEnd,
+          },
+        ],
+      },
+      {
+        match: (sql) =>
+          sql.includes('from monitor_daily_rollups') &&
+          sql.includes('group by monitor_id'),
+        all: () => [],
+      },
+      {
+        match: (sql) =>
+          sql.includes('select checked_at, status') &&
+          sql.includes('from check_results') &&
+          sql.includes('where monitor_id = ?1'),
+        all: () => [],
+      },
+      {
+        match: (sql) =>
+          sql.includes('select started_at, ended_at') &&
+          sql.includes('from outages') &&
+          sql.includes('where monitor_id = ?1'),
+        all: () => [],
+      },
+      {
+        match: (sql) =>
+          sql.includes('with input(monitor_id, interval_sec, created_at, last_checked_at) as (') &&
+          sql.includes('unknown_overlap'),
+        first: () => ({
+          start_at: dayStart,
+          total_sec: 3_600,
+          downtime_sec: 300,
+          unknown_sec: 0,
+        }),
+      },
+      {
+        match: 'insert into public_snapshots',
+        run: () => ({ meta: { changes: 1 } }),
+      },
+      {
+        match: (sql) =>
+          sql.includes('coalesce(sum(case when r.day_start_at >= ?2 then r.total_sec else 0 end), 0) as total_sec_30d') &&
+          sql.includes('left join monitor_daily_rollups r'),
+        all: () => [
+          {
+            monitor_id: 21,
+            total_sec_30d: 0,
+            downtime_sec_30d: 0,
+            unknown_sec_30d: 0,
+            uptime_sec_30d: 0,
+            total_sec_90d: 0,
+            downtime_sec_90d: 0,
+            unknown_sec_90d: 0,
+            uptime_sec_90d: 0,
+          },
+        ],
+      },
+      {
+        match: 'insert into locks',
+        run: () => ({ meta: { changes: 1 } }),
+      },
+    ];
+
+    const { res, body, waitUntil } = await requestPublicUi('/analytics/uptime?range=30d', handlers);
+
+    expect(res.status).toBe(200);
+    expect(waitUntil).toHaveBeenCalled();
+    expect(body).toMatchObject({
+      overall: {
+        total_sec: 3_600,
+        downtime_sec: 0,
+      },
+      monitors: [
+        {
+          id: 21,
+          total_sec: 3_600,
+          downtime_sec: 0,
         },
       ],
     });

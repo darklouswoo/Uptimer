@@ -31,13 +31,46 @@ describe('scheduler/daily-rollup', () => {
     const outageQueryArgs: unknown[][] = [];
     const checkQueryArgs: unknown[][] = [];
     const rollupInsertArgs: unknown[][] = [];
+    const snapshotInsertArgs: unknown[][] = [];
 
     const env = createEnv([
       {
-        match: 'from monitors',
+        match: (sql) =>
+          sql.includes('select id, interval_sec, created_at') &&
+          sql.includes('from monitors') &&
+          sql.includes('where created_at < ?1'),
         all: () => [
           { id: 1, interval_sec: 60, created_at: targetDayStart - 86_400 },
           { id: 2, interval_sec: 60, created_at: targetDayStart - 43_200 },
+        ],
+      },
+      {
+        match: (sql) =>
+          sql.includes('coalesce(sum(case when r.day_start_at >= ?2 then r.total_sec else 0 end), 0) as total_sec_30d') &&
+          sql.includes('left join monitor_daily_rollups r'),
+        all: () => [
+          {
+            monitor_id: 1,
+            total_sec_30d: 86_400,
+            downtime_sec_30d: 3_600,
+            unknown_sec_30d: 0,
+            uptime_sec_30d: 82_800,
+            total_sec_90d: 86_400,
+            downtime_sec_90d: 3_600,
+            unknown_sec_90d: 0,
+            uptime_sec_90d: 82_800,
+          },
+          {
+            monitor_id: 2,
+            total_sec_30d: 43_200,
+            downtime_sec_30d: 0,
+            unknown_sec_30d: 0,
+            uptime_sec_30d: 43_200,
+            total_sec_90d: 43_200,
+            downtime_sec_90d: 0,
+            unknown_sec_90d: 0,
+            uptime_sec_90d: 43_200,
+          },
         ],
       },
       {
@@ -86,6 +119,13 @@ describe('scheduler/daily-rollup', () => {
           return { meta: { changes: 1 } };
         },
       },
+      {
+        match: 'insert into public_snapshots',
+        run: (args) => {
+          snapshotInsertArgs.push(args);
+          return { meta: { changes: 1 } };
+        },
+      },
     ]);
 
     const scheduledTime = Date.UTC(2026, 1, 18, 0, 0, 0);
@@ -114,6 +154,8 @@ describe('scheduler/daily-rollup', () => {
     expect(rollupInsertArgs[0]?.[1]).toBe(targetDayStart);
     expect(rollupInsertArgs[1]?.[0]).toBe(2);
     expect(rollupInsertArgs[1]?.[1]).toBe(targetDayStart);
+    expect(snapshotInsertArgs).toHaveLength(1);
+    expect(snapshotInsertArgs[0]?.[0]).toBe('analytics-overview');
   });
 
   it('keeps check-result batch windows aligned to each monitor interval group', async () => {
@@ -123,12 +165,21 @@ describe('scheduler/daily-rollup', () => {
 
     const env = createEnv([
       {
-        match: 'from monitors',
+        match: (sql) =>
+          sql.includes('select id, interval_sec, created_at') &&
+          sql.includes('from monitors') &&
+          sql.includes('where created_at < ?1'),
         all: () => [
           { id: 1, interval_sec: 60, created_at: targetDayStart - 86_400 },
           { id: 2, interval_sec: 60, created_at: targetDayStart - 43_200 },
           { id: 3, interval_sec: 3_600, created_at: targetDayStart - 86_400 },
         ],
+      },
+      {
+        match: (sql) =>
+          sql.includes('coalesce(sum(case when r.day_start_at >= ?2 then r.total_sec else 0 end), 0) as total_sec_30d') &&
+          sql.includes('left join monitor_daily_rollups r'),
+        all: () => [],
       },
       {
         match: (sql) => sql.includes('from outages') && sql.includes('monitor_id in'),
@@ -143,6 +194,10 @@ describe('scheduler/daily-rollup', () => {
       },
       {
         match: 'insert into monitor_daily_rollups',
+        run: () => ({ meta: { changes: 1 } }),
+      },
+      {
+        match: 'insert into public_snapshots',
         run: () => ({ meta: { changes: 1 } }),
       },
     ]);
@@ -165,13 +220,22 @@ describe('scheduler/daily-rollup', () => {
 
     const env = createEnv([
       {
-        match: 'from monitors',
+        match: (sql) =>
+          sql.includes('select id, interval_sec, created_at') &&
+          sql.includes('from monitors') &&
+          sql.includes('where created_at < ?1'),
         all: () =>
           Array.from({ length: 91 }, (_, index) => ({
             id: index + 1,
             interval_sec: 60,
             created_at: targetDayStart - 86_400,
           })),
+      },
+      {
+        match: (sql) =>
+          sql.includes('coalesce(sum(case when r.day_start_at >= ?2 then r.total_sec else 0 end), 0) as total_sec_30d') &&
+          sql.includes('left join monitor_daily_rollups r'),
+        all: () => [],
       },
       {
         match: (sql) => sql.includes('from outages') && sql.includes('monitor_id in'),
@@ -189,6 +253,10 @@ describe('scheduler/daily-rollup', () => {
       },
       {
         match: 'insert into monitor_daily_rollups',
+        run: () => ({ meta: { changes: 1 } }),
+      },
+      {
+        match: 'insert into public_snapshots',
         run: () => ({ meta: { changes: 1 } }),
       },
     ]);
