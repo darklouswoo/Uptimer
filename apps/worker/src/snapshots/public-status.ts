@@ -1,4 +1,5 @@
 import { AppError } from '../middleware/errors';
+import type { Trace } from '../observability/trace';
 import { publicStatusResponseSchema, type PublicStatusResponse } from '../schemas/public-status';
 import { primeStatusSnapshotCache } from './public-status-read';
 
@@ -23,6 +24,18 @@ const UPSERT_STATUS_SQL = `
 
 const readStatusStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const upsertStatusStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
+
+function withTraceSync<T>(trace: Trace | undefined, name: string, fn: () => T): T {
+  return trace ? trace.time(name, fn) : fn();
+}
+
+async function withTraceAsync<T>(
+  trace: Trace | undefined,
+  name: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return trace ? trace.timeAsync(name, fn) : await fn();
+}
 
 export function getSnapshotKey() {
   return SNAPSHOT_KEY;
@@ -134,8 +147,9 @@ export async function writeStatusSnapshot(
   db: D1Database,
   now: number,
   payload: PublicStatusResponse,
+  trace?: Trace,
 ): Promise<void> {
-  const bodyJson = JSON.stringify(payload);
+  const bodyJson = withTraceSync(trace, 'status_write_stringify', () => JSON.stringify(payload));
   const cached = upsertStatusStatementByDb.get(db);
   const statement = cached ?? db.prepare(UPSERT_STATUS_SQL);
   if (!cached) {
@@ -149,15 +163,20 @@ export async function writeStatusSnapshot(
     bodyJson,
     data: payload,
   });
-  await statement
-    .bind(
-      SNAPSHOT_KEY,
-      payload.generated_at,
-      bodyJson,
-      now,
-      now + FUTURE_SNAPSHOT_TOLERANCE_SECONDS,
-    )
-    .run();
+  await withTraceAsync(
+    trace,
+    'status_write_run',
+    async () =>
+      await statement
+        .bind(
+          SNAPSHOT_KEY,
+          payload.generated_at,
+          bodyJson,
+          now,
+          now + FUTURE_SNAPSHOT_TOLERANCE_SECONDS,
+        )
+        .run(),
+  );
 }
 
 export function applyStatusCacheHeaders(res: Response, ageSeconds: number): void {

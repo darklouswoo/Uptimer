@@ -782,7 +782,8 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       if (trace) {
         await trace.timeAsync(
           'status_refresh_write',
-          async () => await statusSnapshotMod.writeStatusSnapshot(env.DB, now, refreshedStatusPayload),
+          async () =>
+            await statusSnapshotMod.writeStatusSnapshot(env.DB, now, refreshedStatusPayload, trace),
         );
       } else {
         await statusSnapshotMod.writeStatusSnapshot(env.DB, now, refreshedStatusPayload);
