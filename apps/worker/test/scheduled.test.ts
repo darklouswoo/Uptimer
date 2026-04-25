@@ -46,6 +46,7 @@ import {
   runExclusivePersistedMonitorBatch,
   runScheduledTick,
 } from '../src/scheduler/scheduled';
+import { LeaseLostError } from '../src/scheduler/lease-guard';
 import { acquireLease, releaseLease, renewLease } from '../src/scheduler/lock';
 import { refreshPublicHomepageSnapshotIfNeeded } from '../src/snapshots';
 import { readSettings } from '../src/settings';
@@ -1043,7 +1044,7 @@ describe('scheduler/scheduled regression', () => {
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
-  it('renews claimed monitor execution leases during long-running batches', async () => {
+  it('keeps fixed claimed monitor execution leases during batches within the lease window', async () => {
     let resolveCheck: ((value: unknown) => void) | null = null;
 
     vi.mocked(runHttpCheck).mockImplementation(
@@ -1094,7 +1095,7 @@ describe('scheduler/scheduled regression', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(renewLease).toHaveBeenCalledWith(
+    expect(renewLease).not.toHaveBeenCalledWith(
       env.DB,
       `scheduler:batch-monitor:${checkedAt}:1`,
       expect.any(Number),
@@ -1109,6 +1110,72 @@ describe('scheduler/scheduled regression', () => {
       attempts: 1,
     });
     await batchPromise;
+  });
+
+  it('fails closed when a fixed claimed monitor execution lease expires before persistence', async () => {
+    let resolveCheck: ((value: unknown) => void) | null = null;
+    let persistedWrites = 0;
+
+    vi.mocked(runHttpCheck).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCheck = resolve;
+        }) as never,
+    );
+
+    const env = createEnv({
+      dueRows: [
+        {
+          id: 1,
+          name: 'API 1',
+          type: 'http',
+          target: 'https://example.com/1',
+          interval_sec: 60,
+          created_at: 1_760_000_001,
+          timeout_ms: 10_000,
+          http_method: 'GET',
+          http_headers_json: null,
+          http_body: null,
+          expected_status_json: null,
+          response_keyword: null,
+          response_keyword_mode: null,
+          response_forbidden_keyword: null,
+          response_forbidden_keyword_mode: null,
+          state_status: 'up',
+          state_last_error: null,
+          last_checked_at: 1_759_999_940,
+          last_changed_at: 1_759_999_940,
+          consecutive_failures: 0,
+          consecutive_successes: 1,
+        },
+      ],
+      onRun: () => {
+        persistedWrites += 1;
+      },
+    });
+    const checkedAt = Math.floor(Math.floor(Date.now() / 1000) / 60) * 60;
+
+    const batchPromise = runExclusivePersistedMonitorBatch({
+      db: env.DB,
+      ids: [1],
+      checkedAt,
+      stateMachineConfig: {
+        failuresToDownFromUp: 2,
+        successesToUpFromDown: 2,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(76_000);
+    resolveCheck?.({
+      status: 'up',
+      latencyMs: 21,
+      httpStatus: 200,
+      error: null,
+      attempts: 1,
+    });
+
+    await expect(batchPromise).rejects.toBeInstanceOf(LeaseLostError);
+    expect(persistedWrites).toBe(0);
   });
 
   it('skips monitor ids already claimed by an overlapping batch execution', async () => {

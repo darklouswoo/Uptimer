@@ -43,8 +43,6 @@ const BATCH_EXECUTION_LOCK_PREFIX = 'scheduler:batch:';
 const MONITOR_EXECUTION_LOCK_PREFIX = 'scheduler:batch-monitor:';
 const BATCH_EXECUTION_LOCK_LEASE_SECONDS = 15 * 60;
 const MONITOR_EXECUTION_LOCK_LEASE_SECONDS = 75;
-const MONITOR_EXECUTION_LOCK_RENEW_INTERVAL_MS = 25_000;
-const MONITOR_EXECUTION_LOCK_RENEW_MIN_REMAINING_SECONDS = 25;
 const BATCH_EXECUTION_LOCK_RENEW_INTERVAL_MS = 60_000;
 const BATCH_EXECUTION_LOCK_RENEW_MIN_REMAINING_SECONDS = 5 * 60;
 
@@ -660,7 +658,7 @@ function buildMonitorExecutionLockName(checkedAt: number, id: number): string {
 type MonitorExecutionLease = {
   id: number;
   name: string;
-  guard: ReturnType<typeof startRenewableLease>;
+  expiresAt: number;
 };
 
 async function claimMonitorExecutionLeases(
@@ -670,26 +668,23 @@ async function claimMonitorExecutionLeases(
   now: number,
 ): Promise<{ claimedIds: number[]; leases: MonitorExecutionLease[] }> {
   const claimedIds: number[] = [];
-  const leases: MonitorExecutionLease[] = [];
   const expiresAt = now + MONITOR_EXECUTION_LOCK_LEASE_SECONDS;
 
-  for (const id of ids) {
-    const name = buildMonitorExecutionLockName(checkedAt, id);
-    const acquired = await acquireLease(db, name, now, MONITOR_EXECUTION_LOCK_LEASE_SECONDS);
-    if (!acquired) {
+  const attempts = await Promise.all(
+    ids.map(async (id) => {
+      const name = buildMonitorExecutionLockName(checkedAt, id);
+      const acquired = await acquireLease(db, name, now, MONITOR_EXECUTION_LOCK_LEASE_SECONDS);
+      return acquired ? { id, name, expiresAt } : null;
+    }),
+  );
+
+  const leases: MonitorExecutionLease[] = [];
+  for (const lease of attempts) {
+    if (!lease) {
       continue;
     }
-    const guard = startRenewableLease({
-      db,
-      name,
-      leaseSeconds: MONITOR_EXECUTION_LOCK_LEASE_SECONDS,
-      initialExpiresAt: expiresAt,
-      renewIntervalMs: MONITOR_EXECUTION_LOCK_RENEW_INTERVAL_MS,
-      renewMinRemainingSeconds: MONITOR_EXECUTION_LOCK_RENEW_MIN_REMAINING_SECONDS,
-      logPrefix: `scheduled batch monitor ${id}`,
-    });
-    claimedIds.push(id);
-    leases.push({ id, name, guard });
+    claimedIds.push(lease.id);
+    leases.push(lease);
   }
 
   return { claimedIds, leases };
@@ -801,7 +796,9 @@ export async function runExclusivePersistedMonitorBatch(opts: {
         }
         batchLease.assertHeld(`persisting ${lockName}`);
         for (const lease of claimedMonitorLeases) {
-          lease.guard.assertHeld(`persisting ${lease.name}`);
+          if (Math.floor(Date.now() / 1000) >= lease.expiresAt) {
+            throw new LeaseLostError(`scheduled batch monitor: ${lease.name} lease expired`);
+          }
         }
       },
     });
@@ -816,10 +813,7 @@ export async function runExclusivePersistedMonitorBatch(opts: {
     const releaseBatchLeases = async () => {
       await Promise.all(
         claimedMonitorLeases.map(async (lease) => {
-          await lease.guard.stop().catch((err) => {
-            console.warn('scheduled batch monitor: lease renewal task failed', err);
-          });
-          await releaseLease(opts.db, lease.name, lease.guard.getExpiresAt()).catch((err) => {
+          await releaseLease(opts.db, lease.name, lease.expiresAt).catch((err) => {
             console.warn('scheduled: failed to release monitor execution lease', err);
           });
         }),
