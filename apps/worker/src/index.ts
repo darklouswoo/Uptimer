@@ -27,6 +27,12 @@ function normalizeTruthyHeader(value: string | null): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
+function normalizeFalsyHeader(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off';
+}
+
 function readBearerToken(authHeader: string | null): string | null {
   if (!authHeader) return null;
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -968,7 +974,10 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
         console.warn('internal refresh: lease renewal task failed', err);
       });
     }
-    if (claimedLeaseExpiresAt !== null && releaseHomepageRefreshLease) {
+    const shouldReleaseHomepageRefreshLease = !normalizeFalsyHeader(
+      env.UPTIMER_HOMEPAGE_RELEASE_LOCK,
+    );
+    if (claimedLeaseExpiresAt !== null && releaseHomepageRefreshLease && shouldReleaseHomepageRefreshLease) {
       await releaseHomepageRefreshLease(
         env.DB,
         HOMEPAGE_REFRESH_LOCK_NAME,
