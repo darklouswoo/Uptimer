@@ -468,9 +468,11 @@ async function handlePublicHomepageArtifact(req: Request, env: Env): Promise<Res
 }
 
 async function handlePublicHomepage(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const { applyHomepageCacheHeaders, readHomepageSnapshotJsonAnyAge } = await import(
-    './snapshots/public-homepage-read'
-  );
+  const {
+    applyHomepageCacheHeaders,
+    readHomepageSnapshotJson,
+    readHomepageSnapshotJsonAnyAge,
+  } = await import('./snapshots/public-homepage-read');
   const now = Math.floor(Date.now() / 1000);
   const trace = await resolveTrace(req, env);
   if (trace) {
@@ -480,9 +482,9 @@ async function handlePublicHomepage(req: Request, env: Env, ctx: ExecutionContex
   const snapshot = trace
     ? await trace.timeAsync(
         'homepage_snapshot_read',
-        () => readHomepageSnapshotJsonAnyAge(env.DB, now, PUBLIC_STATIC_STALE_MAX_SECONDS),
+        () => readHomepageSnapshotJson(env.DB, now),
       )
-    : await readHomepageSnapshotJsonAnyAge(env.DB, now, PUBLIC_STATIC_STALE_MAX_SECONDS);
+    : await readHomepageSnapshotJson(env.DB, now);
   if (snapshot) {
     const res = new Response(snapshot.bodyJson, {
       status: 200,
@@ -490,8 +492,29 @@ async function handlePublicHomepage(req: Request, env: Env, ctx: ExecutionContex
     });
     applyHomepageCacheHeaders(res, Math.min(60, snapshot.age));
     if (trace) {
-      trace.setLabel('path', snapshot.age > 60 ? 'stale_snapshot' : 'snapshot');
+      trace.setLabel('path', 'snapshot');
       trace.setLabel('age', snapshot.age);
+      trace.finish('total');
+      await applyTrace(res, trace, 'w');
+    }
+    return res;
+  }
+
+  const stale = trace
+    ? await trace.timeAsync(
+        'homepage_snapshot_stale_read',
+        () => readHomepageSnapshotJsonAnyAge(env.DB, now, PUBLIC_STATIC_STALE_MAX_SECONDS),
+      )
+    : await readHomepageSnapshotJsonAnyAge(env.DB, now, PUBLIC_STATIC_STALE_MAX_SECONDS);
+  if (stale) {
+    const res = new Response(stale.bodyJson, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    });
+    applyHomepageCacheHeaders(res, Math.min(60, stale.age));
+    if (trace) {
+      trace.setLabel('path', 'stale_snapshot');
+      trace.setLabel('age', stale.age);
       trace.finish('total');
       await applyTrace(res, trace, 'w');
     }

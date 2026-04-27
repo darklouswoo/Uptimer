@@ -192,6 +192,59 @@ describe('public homepage route', () => {
     expect(await res.json()).toEqual(payload);
   });
 
+  it('prefers a fresh artifact snapshot over a stale homepage payload row', async () => {
+    const stalePayload = samplePayload(100);
+    const freshPayload = samplePayload(190);
+    const render = {
+      generated_at: freshPayload.generated_at,
+      preload_html: '<div id="uptimer-preload">fresh</div>',
+      snapshot_json: JSON.stringify(freshPayload),
+      meta_title: 'Uptimer',
+      meta_description: 'All Systems Operational',
+    };
+    vi.spyOn(Date, 'now').mockReturnValue(200_000);
+
+    const res = await requestHomepageViaApp('/api/v1/public/homepage', [
+      {
+        match: 'from public_snapshots',
+        first: (args) => {
+          if (args[0] === 'homepage') {
+            return {
+              generated_at: stalePayload.generated_at,
+              updated_at: stalePayload.generated_at,
+              body_json: JSON.stringify(stalePayload),
+            };
+          }
+          if (args[0] === 'homepage:artifact') {
+            return {
+              generated_at: freshPayload.generated_at,
+              updated_at: freshPayload.generated_at,
+              body_json: JSON.stringify(render),
+            };
+          }
+          return null;
+        },
+        all: () => [
+          {
+            key: 'homepage',
+            generated_at: stalePayload.generated_at,
+            updated_at: stalePayload.generated_at,
+            body_json: JSON.stringify(stalePayload),
+          },
+          {
+            key: 'homepage:artifact',
+            generated_at: freshPayload.generated_at,
+            updated_at: freshPayload.generated_at,
+            body_json: JSON.stringify(render),
+          },
+        ],
+      },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(freshPayload);
+  });
+
   it('serves homepage render artifacts from the artifact snapshot row', async () => {
     const payload = samplePayload(190);
     const render = {
