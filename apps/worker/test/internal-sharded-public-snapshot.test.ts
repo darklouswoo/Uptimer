@@ -132,7 +132,7 @@ function homepagePayload() {
   };
 }
 
-function createFragmentEnv(): Env {
+function createFragmentEnv(extraHandlers: Parameters<typeof createFakeD1Database>[0] = []): Env {
   const statusEnvelope = buildStatusEnvelopeFragmentWrite(statusPayload(), 1_700_000_005);
   const statusMonitors = buildStatusMonitorFragmentWrites(statusPayload(), 1_700_000_005);
   const homepageEnvelope = buildHomepageEnvelopeFragmentWrite(homepagePayload(), 1_700_000_005);
@@ -157,6 +157,7 @@ function createFragmentEnv(): Env {
           }
         },
       },
+      ...extraHandlers,
     ]),
     ADMIN_TOKEN: 'test-admin-token',
     UPTIMER_PUBLIC_SHARDED_ASSEMBLER: '1',
@@ -278,6 +279,49 @@ describe('internal sharded public snapshot assembler route', () => {
       error_name: 'Error',
       error_message: 'fragment read failed',
     });
+  });
+
+  it('publishes raw assembled JSON to the static snapshot row when explicitly requested and enabled', async () => {
+    const writes: unknown[][] = [];
+    const env = {
+      ...createFragmentEnv([
+        {
+          match: 'insert into public_snapshots',
+          run: (args) => {
+            writes.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ]),
+      UPTIMER_PUBLIC_SHARDED_SNAPSHOT_PUBLISH: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ kind: 'status', assembly: 'json', publish: true }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      assembled: true,
+      kind: 'status',
+      assembly: 'json',
+      published: true,
+      write_count: 1,
+    });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]![0]).toBe('status');
+    expect(writes[0]![1]).toBe(1_700_000_000);
+    expect(typeof writes[0]![2]).toBe('string');
   });
 
   it('assembles fragment JSON without parsing every monitor when requested', async () => {

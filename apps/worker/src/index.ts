@@ -204,6 +204,7 @@ const internalShardedPublicSnapshotBodySchema = z.object({
   kind: z.enum(['homepage', 'status']),
   assembly: z.enum(['validated', 'json']).optional().default('validated'),
   measure_body_bytes: z.boolean().optional().default(false),
+  publish: z.boolean().optional().default(false),
 });
 
 const internalShardedPublicSnapshotSeedBodySchema = z.object({
@@ -500,11 +501,16 @@ async function handleInternalShardedPublicSnapshotAssemble(
   const { assembleShardedPublicSnapshot } = await import(
     './internal/sharded-public-snapshot-core'
   );
+  const canPublish =
+    parsed.data.publish &&
+    normalizeTruthyHeader(env.UPTIMER_PUBLIC_SHARDED_SNAPSHOT_PUBLISH ?? null);
   const result = await assembleShardedPublicSnapshot({
     env,
     kind: parsed.data.kind,
     mode: parsed.data.assembly,
     measureBodyBytes: parsed.data.measure_body_bytes,
+    publish: canPublish,
+    now: Math.floor(Date.now() / 1000),
   });
   return buildInternalJsonResponse(
     {
@@ -517,6 +523,8 @@ async function handleInternalShardedPublicSnapshotAssemble(
       stale_count: result.staleCount,
       ...(result.generatedAt !== undefined ? { generated_at: result.generatedAt } : {}),
       ...(result.bodyBytes !== undefined ? { body_bytes: result.bodyBytes } : {}),
+      ...(result.published !== undefined ? { published: result.published } : {}),
+      ...(result.writeCount !== undefined ? { write_count: result.writeCount } : {}),
       ...(result.skip ? { skip: result.skip } : {}),
       ...(result.error ? { error: true } : {}),
       ...(result.errorName ? { error_name: result.errorName } : {}),
@@ -660,6 +668,7 @@ async function handleInternalShardedPublicSnapshotContinuation(
       ...(result.refreshed !== undefined ? { refreshed: result.refreshed } : {}),
       ...(result.seeded !== undefined ? { seeded: result.seeded } : {}),
       ...(result.assembled !== undefined ? { assembled: result.assembled } : {}),
+      ...(result.published !== undefined ? { published: result.published } : {}),
       ...(result.kind ? { kind: result.kind } : {}),
       ...(result.part ? { part: result.part } : {}),
       ...(result.monitorCount !== undefined ? { monitor_count: result.monitorCount } : {}),
